@@ -1,0 +1,8 @@
+schema_version = 1
+
+[demo]
+message = "hello from skillcfg"
+attempts = 3
+enabled = true
+ratio = 0.5
+items = ["first", "second"]

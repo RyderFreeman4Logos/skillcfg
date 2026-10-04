@@ -1,0 +1,4 @@
+pre-commit:
+  commands:
+    quality:
+      run: just check
