@@ -146,9 +146,11 @@ fn discover(
             None
         };
     let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
+    let roots_overridden = !roots.is_empty();
     let (configured, ignores, explicit) =
-        discovery::settings(config.as_ref(), &path, &home).map_err(CliError::Failure)?;
-    let explicit = explicit || !roots.is_empty();
+        discovery::settings(config.as_ref(), &path, &home, roots_overridden)
+            .map_err(CliError::Failure)?;
+    let explicit = explicit || roots_overridden;
     if roots.is_empty() {
         roots = configured;
     }
@@ -286,9 +288,11 @@ fn find_skills(
     mut roots: Vec<PathBuf>,
 ) -> Result<discovery::Discovery, CliError> {
     let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
+    let roots_overridden = !roots.is_empty();
     let (configured, ignores, explicit) =
-        discovery::settings(Some(config), path, &home).map_err(CliError::Failure)?;
-    let explicit = explicit || !roots.is_empty();
+        discovery::settings(Some(config), path, &home, roots_overridden)
+            .map_err(CliError::Failure)?;
+    let explicit = explicit || roots_overridden;
     if roots.is_empty() {
         roots = configured;
     }
@@ -346,7 +350,7 @@ fn validate_command(
         .transpose()
         .map_err(|e| CliError::Failure(format!("cannot resolve skill directory: {e}")))?;
     let mut result = if let Some(skill_path) = skill_path {
-        discovery::discover(&[skill_path], &[], true)
+        discovery::discover_selected(&skill_path)
     } else {
         find_skills(&config, &path, roots)?
     };

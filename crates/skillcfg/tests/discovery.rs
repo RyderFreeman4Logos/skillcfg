@@ -37,6 +37,15 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    fn run_without_home(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_skillcfg"))
+            .args(args)
+            .env_remove("HOME")
+            .env_remove("SKILLCFG_CONFIG")
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .unwrap()
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -227,6 +236,98 @@ fn global_validation_strict_links_aliases_and_single_skill_isolation() {
     let out = f.run(&["--config", text(&config), "validate-skill", text(&skill)]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("invalid TOML"));
+}
+
+#[test]
+fn explicit_roots_need_no_home_and_preserve_config_policy() {
+    let f = Fixture::new();
+    let root = f.0.join("explicit-root");
+    f.skill("explicit-root/keep", "keep");
+    f.skill("explicit-root/ignored-shelf/hidden", "hidden");
+
+    let minimal_config = f.0.join("minimal.toml");
+    fs::write(&minimal_config, "schema_version = 1\n").unwrap();
+    let out = f.run_without_home(&[
+        "--config",
+        text(&minimal_config),
+        "discover",
+        "--root",
+        text(&root),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "hidden\nkeep\n");
+    let out = f.run_without_home(&["--config", text(&minimal_config), "discover"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("HOME is required for conventional"));
+
+    let config = f.0.join("configured.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[discovery]\nroots = [\"~/unused\"]\nignore = [\"ignored-*\"]\n[values]\nok = \"present\"\n",
+    )
+    .unwrap();
+    let config = text(&config);
+    let root = text(&root);
+    let commands = [
+        vec!["--config", config, "discover", "--root", root],
+        vec!["--config", config, "show-skill", "keep", "--root", root],
+        vec!["--config", config, "validate", "--root", root],
+        vec!["--config", config, "explain", "values.ok", "--root", root],
+    ];
+    for args in commands {
+        let out = f.run_without_home(&args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let out = f.run_without_home(&["--config", config, "discover"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("HOME is required for ~ expansion"));
+}
+
+#[test]
+fn validate_skill_ignores_nested_skill_admission_but_global_validation_reports_it() {
+    let f = Fixture::new();
+    let parent = f.skill("root/parent", "parent");
+    let child = parent.join("nested");
+    fs::create_dir_all(&child).unwrap();
+    let config = f.0.join("config.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[discovery]\nroots = [\"root\"]\n",
+    )
+    .unwrap();
+
+    let mut failures = Vec::new();
+    for (name, diagnostic) in [
+        ("parent", "name collision"),
+        ("bad name", "invalid skill name"),
+    ] {
+        fs::write(
+            child.join("SKILL.md"),
+            format!("---\nname: {name}\n---\n# Nested\n"),
+        )
+        .unwrap();
+        let out = f.run(&["--config", text(&config), "validate-skill", text(&parent)]);
+        if !out.status.success() {
+            failures.push(format!(
+                "selected validation {name:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        let out = f.run(&["--config", text(&config), "validate", "--strict"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() != Some(1) || !stderr.contains(diagnostic) {
+            failures.push(format!("global validation {name:?}: {stderr}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]
@@ -569,7 +670,7 @@ fn defaults_config_ignore_and_deleted_manifest_are_verified() {
 #[test]
 fn absent_home_and_control_character_paths_fail_safely() {
     let settings =
-        skillcfg_core::discovery::settings(None, Path::new("config.toml"), Path::new(""));
+        skillcfg_core::discovery::settings(None, Path::new("config.toml"), Path::new(""), false);
     assert!(
         settings.is_err(),
         "missing HOME must not silently scan cwd-relative default roots"

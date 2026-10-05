@@ -38,6 +38,7 @@ pub fn settings(
     config: Option<&Config>,
     config_path: &Path,
     home: &Path,
+    roots_overridden: bool,
 ) -> Result<(Vec<PathBuf>, Vec<String>, bool), String> {
     let mut roots = Vec::new();
     let mut ignores = vec![".git", "target", "node_modules", ".cache", "__pycache__"]
@@ -62,6 +63,9 @@ pub fn settings(
                             format!("discovery.{field} must contain nonempty strings")
                         })?;
                         if field == "roots" {
+                            if roots_overridden {
+                                continue;
+                            }
                             let path = expand_path(value, home)?;
                             roots.push(if path.is_absolute() {
                                 path
@@ -76,7 +80,7 @@ pub fn settings(
             }
         }
     }
-    if !configured {
+    if !configured && !roots_overridden {
         if home.as_os_str().is_empty() {
             return Err("HOME is required for conventional discovery roots".to_owned());
         }
@@ -105,6 +109,18 @@ pub fn expand_path(value: &str, home: &Path) -> Result<PathBuf, String> {
 /// are silent; explicit missing roots are errors. Active ancestors stop cycles, while aliases
 /// are traversed to retain child exposures. Canonical SKILL.md names are read once.
 pub fn discover(roots: &[PathBuf], ignores: &[String], explicit: bool) -> Discovery {
+    discover_inner(roots, ignores, explicit, false)
+}
+/// Discover one selected Skill without admitting nested Skills as command dependencies.
+pub fn discover_selected(root: &Path) -> Discovery {
+    discover_inner(&[root.to_owned()], &[], true, true)
+}
+fn discover_inner(
+    roots: &[PathBuf],
+    ignores: &[String],
+    explicit: bool,
+    selected_only: bool,
+) -> Discovery {
     let mut skills = BTreeMap::<PathBuf, Skill>::new();
     let mut diagnostics = Vec::new();
     for root in roots {
@@ -126,6 +142,7 @@ pub fn discover(roots: &[PathBuf], ignores: &[String], explicit: bool) -> Discov
             &mut BTreeSet::new(),
             &mut skills,
             &mut diagnostics,
+            selected_only,
         );
     }
     let mut skills: Vec<_> = skills.into_values().collect();
@@ -162,6 +179,7 @@ fn walk(
     active: &mut BTreeSet<PathBuf>,
     skills: &mut BTreeMap<PathBuf, Skill>,
     diagnostics: &mut Vec<Diagnostic>,
+    selected_only: bool,
 ) {
     let canonical = match fs::canonicalize(path) {
         Ok(path) => path,
@@ -192,7 +210,8 @@ fn walk(
     match entries {
         Ok(mut entries) => {
             entries.sort_by_key(|entry| entry.file_name());
-            if entries.iter().any(|entry| entry.file_name() == "SKILL.md") {
+            let is_skill = entries.iter().any(|entry| entry.file_name() == "SKILL.md");
+            if is_skill {
                 if let Some(skill) = skills.get_mut(&canonical) {
                     skill.exposures.push(path.to_owned());
                 } else {
@@ -214,14 +233,23 @@ fn walk(
                     }
                 }
             }
-            for entry in entries {
-                if !ignores.iter().any(|pattern| {
-                    glob(
-                        pattern.as_bytes(),
-                        entry.file_name().to_string_lossy().as_bytes(),
-                    )
-                }) {
-                    walk(&entry.path(), ignores, active, skills, diagnostics);
+            if !selected_only || !is_skill {
+                for entry in entries {
+                    if !ignores.iter().any(|pattern| {
+                        glob(
+                            pattern.as_bytes(),
+                            entry.file_name().to_string_lossy().as_bytes(),
+                        )
+                    }) {
+                        walk(
+                            &entry.path(),
+                            ignores,
+                            active,
+                            skills,
+                            diagnostics,
+                            selected_only,
+                        );
+                    }
                 }
             }
         }
