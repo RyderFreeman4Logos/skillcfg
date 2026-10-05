@@ -229,6 +229,55 @@ fn global_validation_strict_links_aliases_and_single_skill_isolation() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("invalid TOML"));
 }
 
+#[test]
+fn explain_lists_only_requested_manifest_and_literal_consumers() {
+    let f = Fixture::new();
+    let a = f.skill("root/a", "a");
+    let b = f.skill("root/b", "b");
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\n[discovery]\nroots = [\"root\"]\n[values]\nshared = \"chosen\"\nunused = 9\nother = \"SYNTHETIC_PRIVATE_CANARY\"\n").unwrap();
+    for skill in [&a, &b] {
+        fs::write(
+            skill.join("skillcfg.toml"),
+            "schema_version = 1\n[opaque]\nshared = \"values.shared\"\nother = \"values.other\"\n",
+        )
+        .unwrap();
+        fs::create_dir(skill.join("scripts")).unwrap();
+        fs::write(
+            skill.join("scripts/run"),
+            "skillcfg get values.shared\nskillcfg get \"$dynamic.key\"\n",
+        )
+        .unwrap();
+    }
+    let args = ["--config", text(&config), "explain", "values.shared"];
+    let out = f.run(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("key=values.shared"));
+    assert!(stdout.contains("value=chosen"));
+    assert!(stdout.contains(text(&config)));
+    assert_eq!(stdout.matches("skillcfg.toml:3").count(), 2);
+    assert_eq!(stdout.matches("scripts/run:1").count(), 2);
+    assert!(stdout.contains("unknown"));
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE_CANARY"));
+    assert!(!stdout.contains("dynamic.key"));
+    assert_eq!(stdout, String::from_utf8(f.run(&args).stdout).unwrap());
+    let out = f.run(&["--config", text(&config), "explain", "values.unused"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("references: none")
+    );
+    let out = f.run(&["--config", text(&config), "explain", "values.absent"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}
+
 fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }

@@ -12,7 +12,7 @@ use skillcfg_core::{
     render_value, validate,
 };
 
-const USAGE: &str = "Usage: skillcfg [--config PATH] <command> [options]\nCommands: get KEY | get-many KEY... [--format kv|json] | show-skill NAME [--all] [--format kv|json] | discover [--root PATH]... [--verbose] | validate [--root PATH]... [--strict] | validate-skill PATH [--strict]";
+const USAGE: &str = "Usage: skillcfg [--config PATH] <command> [options]\nCommands: get KEY | get-many KEY... [--format kv|json] | show-skill NAME [--all] [--format kv|json] | discover [--root PATH]... [--verbose] | validate [--root PATH]... [--strict] | validate-skill PATH [--strict] | explain KEY [--root PATH]...";
 
 #[derive(Debug)]
 enum CliError {
@@ -64,6 +64,9 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let command = command
                     .into_string()
                     .map_err(|_| CliError::Usage("command name must be valid UTF-8".to_owned()))?;
+                if command == "explain" {
+                    return explain(explicit_config, args);
+                }
                 if command == "validate" || command == "validate-skill" {
                     return validate_command(explicit_config, &command, args);
                 }
@@ -351,6 +354,93 @@ fn validate_command(
     }
     report(&result, strict)?;
     write_output("ok\n")
+}
+
+fn explain(
+    explicit_config: Option<PathBuf>,
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(), CliError> {
+    let mut key = None;
+    let mut roots = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--root" {
+            roots.push(PathBuf::from(
+                args.next()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| CliError::Usage("--root requires a nonempty path".to_owned()))?,
+            ));
+        } else if key.is_none() {
+            let raw = arg
+                .into_string()
+                .map_err(|_| CliError::Usage("key must be valid UTF-8".to_owned()))?;
+            key = Some(
+                raw.parse::<ConfigKey>()
+                    .map_err(|e| CliError::Usage(e.to_string()))?,
+            );
+        } else {
+            return Err(CliError::Usage(
+                "explain accepts one key and --root PATH".to_owned(),
+            ));
+        }
+    }
+    let key = key.ok_or_else(|| CliError::Usage("explain requires a key".to_owned()))?;
+    let path = config_path(explicit_config)?;
+    let config = Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?;
+    let value = config
+        .get(&key)
+        .map_err(|e| CliError::Failure(e.to_string()))?;
+    let mut result = find_skills(&config, &path, roots)?;
+    let analyses = result
+        .skills
+        .iter()
+        .map(|s| (s.name.clone(), validate::analyze(s, &config)))
+        .collect::<Vec<_>>();
+    for (_, analysis) in &analyses {
+        for diagnostic in &analysis.diagnostics {
+            result.diagnostics.push(discovery::Diagnostic {
+                error: diagnostic.error,
+                message: diagnostic.message.clone(),
+            });
+        }
+    }
+    report(&result, false)?;
+    let resolved = std::fs::canonicalize(&path)
+        .map_err(|e| CliError::Failure(format!("cannot resolve config path: {e}")))?;
+    let mut output = format!(
+        "key={}\nsource={:?}\ncanonical_source={:?}\n",
+        key.as_str(),
+        path,
+        resolved
+    );
+    output.push_str(&render_pairs(&[("value", value)], false).map_err(CliError::Failure)?);
+    let index = validate::reverse_index(&analyses);
+    if let Some(references) = index.get(key.as_str()) {
+        output.push_str("references:\n");
+        for (skill, r) in references {
+            output.push_str(&format!(
+                "{}\t{}:{}\t{}\n",
+                skill,
+                r.path.display(),
+                r.line,
+                r.origin
+            ));
+        }
+    } else {
+        output.push_str("references: none\n");
+    }
+    for (skill, analysis) in &analyses {
+        for r in &analysis.references {
+            if r.key.is_none() {
+                output.push_str(&format!(
+                    "unknown\t{}\t{}:{}\n",
+                    skill,
+                    r.path.display(),
+                    r.line
+                ));
+            }
+        }
+    }
+    write_output(&output)
 }
 
 fn write_output(rendered: &str) -> Result<(), CliError> {

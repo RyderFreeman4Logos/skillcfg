@@ -46,6 +46,10 @@ model = "model_tiers.review.model_id"
 
 Checks include missing manifest keys, duplicate aliases, collisions, broken links, literal script key existence, undeclared script keys, statically unused opaque dependencies and non-executable shebang scripts. Visible dependencies need not appear in scripts. The read-only scanner recognizes line-local `skillcfg get literal.key`, quoted literal keys, and shell command substitutions. Comments and ordinary quoted strings are skipped. Dynamic keys, unsupported invocation syntax and options are reported as unverifiable, never guessed or executed. This is not a Bash parser, execution tracer or workflow validator; complex/multiline shell scripts still require skill-owned tests. Error output never includes resolved values or source excerpts.
 
+## Impact inspection
+
+`skillcfg explain KEY [--root PATH]...` intentionally shows the requested value, lexical and resolved config source paths, and sorted manifest/script reference locations grouped by logical skill. No other values are printed. `references: none` means no known consumer; dynamic invocations appear separately as `unknown`, not matches. The index is built in memory per invocation, with no daemon/cache or overrides. Malformed dependencies/read errors fail rather than claiming complete impact from a partial index.
+
 ## Development
 
 Install both local hooks with `lefthook install`. `just check` is the fast pre-commit fmt/clippy check. After committing, run the full gate once on a clean HEAD:

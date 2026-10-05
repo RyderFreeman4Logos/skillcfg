@@ -112,6 +112,25 @@ pub fn analyze(skill: &Skill, config: &Config) -> Analysis {
     result.diagnostics.sort_by(|a, b| a.message.cmp(&b.message));
     result
 }
+/// Build an invocation-local reverse index from analyzed consumers. Unverifiable script
+/// expressions are excluded, never attributed to any key. Input order controls reference order.
+pub fn reverse_index(
+    analyses: &[(String, Analysis)],
+) -> std::collections::BTreeMap<&str, Vec<(&str, &Reference)>> {
+    let mut index = std::collections::BTreeMap::<&str, Vec<(&str, &Reference)>>::new();
+    for (skill, analysis) in analyses {
+        for reference in &analysis.references {
+            if let Some(key) = &reference.key {
+                index
+                    .entry(key.as_str())
+                    .or_default()
+                    .push((skill.as_str(), reference));
+            }
+        }
+    }
+    index
+}
+
 fn scan_files(path: &Path, visited: &mut BTreeSet<PathBuf>, result: &mut Analysis) {
     let canonical = match fs::canonicalize(path) {
         Ok(p) => p,
