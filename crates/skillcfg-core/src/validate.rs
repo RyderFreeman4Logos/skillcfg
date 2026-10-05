@@ -215,6 +215,9 @@ fn scan_files(path: &Path, visited: &mut BTreeSet<PathBuf>, result: &mut Analysi
 /// backslashes, unsupported commands/options, and missing keys remain unknown.
 /// ponytail: line-local lexer, not a Bash AST; multiline/complex shell programs need their own tests.
 pub fn scan_source(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
+    scan_source_at_depth(source, 0)
+}
+fn scan_source_at_depth(source: &str, depth: usize) -> Vec<(usize, Option<ConfigKey>)> {
     let mut references = Vec::new();
     let mut heredoc: Option<(String, bool)> = None;
     for (index, line) in source.lines().enumerate() {
@@ -234,12 +237,40 @@ pub fn scan_source(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
         while at < bytes.len() {
             let b = bytes[at];
             if quote != Some(b'\'') && bytes[at..].starts_with(b"$(") {
-                if let Some(key) = invocation(&line[at + 2..]) {
-                    references.push((index + 1, key));
+                let Some(end) = command_substitution_end(line, at) else {
+                    references.push((index + 1, None));
+                    break;
+                };
+                if depth >= 16 {
+                    references.push((index + 1, None));
+                } else {
+                    references.extend(
+                        scan_source_at_depth(&line[at + 2..end - 1], depth + 1)
+                            .into_iter()
+                            .map(|(_, key)| (index + 1, key)),
+                    );
                 }
-                at += 2;
+                at = end;
                 start = false;
                 continue;
+            }
+            if quote != Some(b'\'') && b == b'`' {
+                if let Some(end) = backtick_end(bytes, at) {
+                    if depth >= 16 {
+                        references.push((index + 1, None));
+                    } else {
+                        references.extend(
+                            scan_source_at_depth(&line[at + 1..end - 1], depth + 1)
+                                .into_iter()
+                                .map(|_| (index + 1, None)),
+                        );
+                    }
+                    at = end;
+                    start = false;
+                    continue;
+                }
+                references.push((index + 1, None));
+                break;
             }
             if let Some(q) = quote {
                 if b == q {
@@ -288,6 +319,77 @@ pub fn scan_source(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
         }
     }
     references
+}
+fn command_substitution_end(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut at = start + 2;
+    while at < bytes.len() {
+        let b = bytes[at];
+        if let Some(q) = quote {
+            if q == b'\'' {
+                if b == q {
+                    quote = None;
+                }
+                at += 1;
+            } else if b == b'\\' {
+                at += 2;
+            } else if b == q {
+                quote = None;
+                at += 1;
+            } else if bytes[at..].starts_with(b"$(") {
+                depth += 1;
+                at += 2;
+            } else {
+                at += 1;
+            }
+            continue;
+        }
+        match b {
+            b'\\' => at += 2,
+            b'\'' | b'"' => {
+                quote = Some(b);
+                at += 1;
+            }
+            b'`' => at = backtick_end(bytes, at)?,
+            b'(' => {
+                depth += 1;
+                at += 1;
+            }
+            b')' => {
+                depth -= 1;
+                at += 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+fn backtick_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut quote = None;
+    let mut at = start + 1;
+    while at < bytes.len() {
+        let b = bytes[at];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            } else if b == b'\\' && q == b'"' {
+                at += 1;
+            }
+        } else if b == b'\\' {
+            at += 1;
+        } else if b == b'\'' || b == b'"' {
+            quote = Some(b);
+        } else if b == b'`' {
+            return Some(at + 1);
+        }
+        at += 1;
+    }
+    None
 }
 fn invocation(source: &str) -> Option<Option<ConfigKey>> {
     let source = source.trim_start();

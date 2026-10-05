@@ -432,8 +432,88 @@ fn scanner_does_not_claim_heredoc_text_or_backtick_shell_as_literals() {
             .iter()
             .any(|(_, k)| k.as_ref().is_some_and(|k| k.as_str() == "fake.heredoc"))
     );
-    assert!(references.iter().any(|(line,k)| *line == 6 && k.as_ref().is_some_and(|k| k.as_str() == "real.literal")));
+    assert!(references
+        .iter()
+        .any(|(line, k)| *line == 6 && k.as_ref().is_some_and(|k| k.as_str() == "real.literal")));
     assert!(references.iter().any(|(line, k)| *line == 7 && k.is_none()));
+}
+
+#[test]
+fn backtick_skillcfg_invocations_are_unknown_to_validate_and_explain() {
+    let f = Fixture::new();
+    let root = f.0.join("root");
+    let skill = f.skill("root/review", "review");
+    fs::create_dir(skill.join("scripts")).unwrap();
+    fs::write(
+        skill.join("scripts/run"),
+        "x=`skillcfg get values.missing`\n",
+    )
+    .unwrap();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\n[values]\nok = \"present\"\n").unwrap();
+
+    let validate = f.run(&[
+        "--config",
+        text(&config),
+        "validate",
+        "--strict",
+        "--root",
+        text(&root),
+    ]);
+    let validate_stderr = String::from_utf8_lossy(&validate.stderr);
+    let explain = f.run(&[
+        "--config",
+        text(&config),
+        "explain",
+        "values.ok",
+        "--root",
+        text(&root),
+    ]);
+    let explain_stdout = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        validate.status.code() == Some(1)
+            && validate_stderr.contains("unverifiable skillcfg invocation")
+            && !validate_stderr.contains("values.missing")
+            && explain.status.success()
+            && explain_stdout.contains("unknown")
+            && !explain_stdout.contains("values.missing"),
+        "validate: {validate_stderr}; explain: {explain_stdout}"
+    );
+}
+
+#[test]
+fn quoted_substitution_data_is_not_a_definite_skillcfg_consumer() {
+    let f = Fixture::new();
+    let root = f.0.join("root");
+    let skill = f.skill("root/review", "review");
+    fs::create_dir(skill.join("scripts")).unwrap();
+    fs::write(
+        skill.join("scripts/run"),
+        "echo \"$(printf '%s' '$(skillcfg get values.missing)')\"\n",
+    )
+    .unwrap();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\n[values]\nok = \"present\"\n").unwrap();
+
+    let validate = f.run(&["--config", text(&config), "validate", "--root", text(&root)]);
+    let validate_stderr = String::from_utf8_lossy(&validate.stderr);
+    let explain = f.run(&[
+        "--config",
+        text(&config),
+        "explain",
+        "values.ok",
+        "--root",
+        text(&root),
+    ]);
+    let explain_stdout = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        validate.status.success()
+            && !validate_stderr.contains("values.missing")
+            && explain.status.success()
+            && explain_stdout.contains("references: none")
+            && !explain_stdout.contains("values.missing"),
+        "validate: {validate_stderr}; explain: {explain_stdout}"
+    );
 }
 
 #[test]
