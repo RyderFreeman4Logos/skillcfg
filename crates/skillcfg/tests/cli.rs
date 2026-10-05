@@ -122,6 +122,48 @@ fn missing_and_malformed_configs_are_stderr_only() {
     assert!(stderr.contains("invalid TOML"));
 }
 
+fn assert_private_error(source: &str, category: &str) {
+    let temp = TempDir::new();
+    let path = temp.0.join("private.toml");
+    fs::write(&path, source).unwrap();
+    let output = run(
+        &["--config", path.to_str().unwrap(), "get", "text"],
+        &temp.0,
+        None,
+        None,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(category));
+    assert!(stderr.contains(path.to_str().unwrap()));
+    assert!(!stderr.contains("SYNTHETIC_PRIVATE_CANARY"), "{stderr}");
+}
+
+#[test]
+fn parser_diagnostics_do_not_disclose_source() {
+    assert_private_error(
+        "schema_version = 1\ntext = \"ok\"\nprivate_value = \"SYNTHETIC_PRIVATE_CANARY\" broken\n",
+        "invalid TOML",
+    );
+}
+
+#[test]
+fn schema_table_diagnostics_do_not_disclose_values() {
+    assert_private_error(
+        "schema_version = { private_value = \"SYNTHETIC_PRIVATE_CANARY\" }\ntext = \"ok\"\n",
+        "unsupported schema_version",
+    );
+}
+
+#[test]
+fn schema_string_diagnostics_do_not_disclose_values() {
+    assert_private_error(
+        "schema_version = \"SYNTHETIC_PRIVATE_CANARY\"\ntext = \"ok\"\n",
+        "unsupported schema_version",
+    );
+}
+
 #[test]
 fn config_path_precedence_is_cli_then_env_then_xdg_then_home() {
     let temp = TempDir::new();

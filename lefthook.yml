@@ -2,3 +2,8 @@ pre-commit:
   commands:
     quality:
       run: just check
+pre-push:
+  commands:
+    admission:
+      run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/admission.py pre-push
+      use_stdin: true
