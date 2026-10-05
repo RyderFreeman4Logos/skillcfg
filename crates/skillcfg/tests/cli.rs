@@ -201,3 +201,153 @@ fn config_path_precedence_is_cli_then_env_then_xdg_then_home() {
     let home_output = run(&["get", "demo.message"], &home, None, None);
     assert_eq!(message(home_output), "home\n");
 }
+
+#[test]
+fn help_shaped_option_values_are_not_help_flags() {
+    let temp = TempDir::new();
+    let config = temp.write_config("config.toml", "hello");
+    let mut failures = Vec::new();
+    for flag in ["--help", "-h"] {
+        let config_dir = TempDir::new();
+        config_dir.write_config(flag, "config-value");
+        let out = Command::new(env!("CARGO_BIN_EXE_skillcfg"))
+            .args(["--config", flag, "get", "demo.message"])
+            .current_dir(&config_dir.0)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert_eq!(message(out), "config-value\n");
+        let skill = temp.0.join(flag);
+        fs::create_dir(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: fixture\n---\n").unwrap();
+        fs::write(
+            skill.join("skillcfg.toml"),
+            "schema_version = 1\n[visible]\nmessage = \"demo.message\"\n",
+        )
+        .unwrap();
+        for (tail, expected) in [
+            (vec!["discover"], "fixture\n"),
+            (vec!["validate"], "ok\n"),
+            (vec!["show-skill", "fixture"], "message=hello\n"),
+            (vec!["explain", "demo.message"], "value=hello\n"),
+        ] {
+            for root in [flag.to_owned(), format!("./{flag}")] {
+                let mut args = vec!["--config", config.to_str().unwrap()];
+                args.extend(&tail);
+                args.extend(["--root", &root]);
+                let out = Command::new(env!("CARGO_BIN_EXE_skillcfg"))
+                    .args(&args)
+                    .current_dir(&temp.0)
+                    .env_clear()
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if !out.status.success() || !stdout.contains(expected) {
+                    failures.push(format!("{args:?}: {stdout}; {:?}", out.stderr));
+                }
+            }
+        }
+        for command in ["get-many", "show-skill"] {
+            let out = run(
+                &[
+                    "--config",
+                    config.to_str().unwrap(),
+                    command,
+                    "demo.message",
+                    "--format",
+                    flag,
+                ],
+                &temp.0,
+                None,
+                None,
+            );
+            if out.status.code() != Some(2)
+                || !out.stdout.is_empty()
+                || !String::from_utf8_lossy(&out.stderr).contains("--format requires kv or json")
+            {
+                failures.push(format!("{command} --format {flag}: {out:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn every_help_option_succeeds_without_loading_config_or_home() {
+    let temp = TempDir::new();
+    let missing_config = temp.0.join("must-not-be-read.toml");
+    let cases = [
+        (
+            "",
+            "Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]",
+            "List discovered skills from configured or conventional roots.",
+        ),
+        (
+            "get",
+            "Usage: skillcfg [--config PATH] get KEY",
+            "literal dotted path",
+        ),
+        (
+            "get-many",
+            "Usage: skillcfg [--config PATH] get-many KEY... [--format kv|json]",
+            "distinct literal dotted keys",
+        ),
+        (
+            "show-skill",
+            "Usage: skillcfg [--config PATH] show-skill NAME [--all] [--format kv|json] [--root PATH]...",
+            "opaque bindings",
+        ),
+        (
+            "discover",
+            "Usage: skillcfg [--config PATH] discover [--root PATH]... [--verbose]",
+            "$HOME/.codex/skills",
+        ),
+        (
+            "validate",
+            "Usage: skillcfg [--config PATH] validate [--root PATH]... [--strict]",
+            "Warnings are non-fatal unless --strict is set.",
+        ),
+        (
+            "validate-skill",
+            "Usage: skillcfg [--config PATH] validate-skill PATH [--strict]",
+            "without traversing\nconfigured roots",
+        ),
+        (
+            "explain",
+            "Usage: skillcfg [--config PATH] explain KEY [--root PATH]...",
+            "intentionally displays the requested value",
+        ),
+    ];
+
+    for (command_name, usage, detail) in cases {
+        for help_flag in ["-h", "--help"] {
+            let mut args = vec!["--config".to_owned(), missing_config.display().to_string()];
+            if !command_name.is_empty() {
+                args.push(command_name.to_owned());
+            }
+            args.push(help_flag.to_owned());
+            let output = Command::new(env!("CARGO_BIN_EXE_skillcfg"))
+                .args(&args)
+                .current_dir(&temp.0)
+                .env_clear()
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains(usage), "{args:?}: {stdout}");
+            assert!(
+                stdout.contains(detail),
+                "{args:?}: missing {detail:?}: {stdout}"
+            );
+        }
+    }
+}

@@ -12,11 +12,138 @@ use skillcfg_core::{
     render_value, validate,
 };
 
-const USAGE: &str = "Usage: skillcfg [--config PATH] <command> [options]\nCommands: get KEY | get-many KEY... [--format kv|json] | show-skill NAME [--all] [--format kv|json] | discover [--root PATH]... [--verbose] | validate [--root PATH]... [--strict] | validate-skill PATH [--strict] | explain KEY [--root PATH]...";
+const USAGE: &str = "Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]";
+const ROOT_HELP: &str = r#"skillcfg - agent-independent runtime preferences for skills
+
+Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]
+
+Commands:
+  get KEY                 Print one configuration value.
+  get-many KEY...         Print several values as key/value pairs or JSON.
+  show-skill NAME         Resolve the bindings declared by a skill.
+  discover                List discovered skills from configured or conventional roots.
+  validate                Validate the configuration and discovered skills.
+  validate-skill PATH     Validate one skill directory.
+  explain KEY             Show one value and its known skill references.
+
+Global options:
+  --config PATH           Select a TOML file; place this option before COMMAND.
+  -h, --help              Show help and exit without loading configuration.
+
+Configuration file selection: --config, SKILLCFG_CONFIG,
+$XDG_CONFIG_HOME/skillcfg/config.toml, then $HOME/.config/skillcfg/config.toml.
+An empty SKILLCFG_CONFIG or XDG_CONFIG_HOME is an error, not a fallback.
+If XDG_CONFIG_HOME is unset, HOME is required to derive the final path.
+Selected files must be UTF-8 TOML with integer schema_version = 1.
+
+Usage errors exit 2; configuration, lookup, discovery, and validation failures exit 1.
+"#;
+const GET_HELP: &str = r#"Usage: skillcfg [--config PATH] get KEY
+
+Print the selected value to stdout. Strings are printed verbatim; other values
+use TOML text. KEY is a literal dotted path with ASCII letters, digits, '_' or
+'-' in each segment. A configuration file is required.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+const GET_MANY_HELP: &str = r#"Usage: skillcfg [--config PATH] get-many KEY... [--format kv|json]
+
+Resolve one or more distinct literal dotted keys before writing output;
+duplicate keys fail. The default 'kv' format preserves input order and prints
+one key=value pair per input key; ambiguous strings are JSON-quoted and
+arrays/tables use compact JSON. 'json' prints a compact object (date/time
+values become strings). A configuration file is required.
+
+Options:
+  --format kv|json        Select output format (default: kv; may appear once).
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+const SHOW_SKILL_HELP: &str = r#"Usage: skillcfg [--config PATH] show-skill NAME [--all] [--format kv|json] [--root PATH]...
+
+Print a discovered skill's bindings, sorted by alias. By default only visible
+bindings are shown; --all also includes opaque bindings. The default 'kv'
+format prints alias=value pairs (ambiguous strings are JSON-quoted; arrays and
+tables use compact JSON); 'json' prints a compact object (date/time values
+become strings). A config file is required. Repeated --root paths replace
+configured discovery roots.
+
+Options:
+  --all                   Include opaque bindings.
+  --format kv|json        Select output format (default: kv; may appear once).
+  --root PATH             Add a discovery root (may be repeated).
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+const DISCOVER_HELP: &str = r#"Usage: skillcfg [--config PATH] discover [--root PATH]... [--verbose]
+
+List discovered skill names, one per line. --verbose adds their resolved
+paths, exposures, and metadata. Without configured discovery.roots, defaults
+are $HOME/.codex/skills, $HOME/.hermes/skills, $HOME/.claude/skills, and
+$HOME/.agents/skills (HOME must be set); missing conventional roots are skipped.
+Missing explicit --root paths are errors. Without --config or SKILLCFG_CONFIG,
+an absent conventional XDG/HOME file does not prevent discovery. Repeated
+--root paths replace configured roots.
+
+Options:
+  --root PATH             Add a discovery root (may be repeated).
+  --verbose               Print detailed discovery metadata.
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+const VALIDATE_HELP: &str = r#"Usage: skillcfg [--config PATH] validate [--root PATH]... [--strict]
+
+Validate the selected configuration, discovered skills, manifests, and scripts.
+Success prints 'ok'. Warnings are non-fatal unless --strict is set. A config
+file is required. Repeated --root paths replace configured discovery roots.
+
+Options:
+  --root PATH             Add a discovery root (may be repeated).
+  --strict                Treat warnings as failures.
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+const VALIDATE_SKILL_HELP: &str = r#"Usage: skillcfg [--config PATH] validate-skill PATH [--strict]
+
+Validate one skill directory containing a readable SKILL.md, without traversing
+configured roots. Success prints 'ok'; --strict treats warnings as failures.
+A config file is required.
+
+Options:
+  --strict                Treat warnings as failures.
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+const EXPLAIN_HELP: &str = r#"Usage: skillcfg [--config PATH] explain KEY [--root PATH]...
+
+Print KEY's value, config source paths, and known skill references. This
+intentionally displays the requested value; no other config values are shown.
+A config file is required. Repeated --root paths replace configured roots.
+
+Options:
+  --root PATH             Add a discovery root (may be repeated).
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
+"#;
+
+fn command_help(command: &str) -> Option<&'static str> {
+    match command {
+        "get" => Some(GET_HELP),
+        "get-many" => Some(GET_MANY_HELP),
+        "show-skill" => Some(SHOW_SKILL_HELP),
+        "discover" => Some(DISCOVER_HELP),
+        "validate" => Some(VALIDATE_HELP),
+        "validate-skill" => Some(VALIDATE_SKILL_HELP),
+        "explain" => Some(EXPLAIN_HELP),
+        _ => None,
+    }
+}
 
 #[derive(Debug)]
 enum CliError {
-    Help,
+    Help(&'static str),
     Usage(String),
     Failure(String),
 }
@@ -24,7 +151,7 @@ enum CliError {
 fn main() {
     match execute(env::args_os().skip(1)) {
         Ok(()) => {}
-        Err(CliError::Help) => println!("{USAGE}"),
+        Err(CliError::Help(help)) => print!("{help}"),
         Err(CliError::Usage(message)) => {
             eprintln!("skillcfg: {message}\n{USAGE}");
             process::exit(2);
@@ -58,12 +185,31 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 explicit_config = Some(path);
             }
             Some(argument) if argument == OsStr::new("--help") || argument == OsStr::new("-h") => {
-                return Err(CliError::Help);
+                return Err(CliError::Help(ROOT_HELP));
             }
             Some(command) => {
                 let command = command
                     .into_string()
                     .map_err(|_| CliError::Usage("command name must be valid UTF-8".to_owned()))?;
+                let help = command_help(&command)
+                    .ok_or_else(|| CliError::Usage(format!("unknown command '{command}'")))?;
+                let command_args = args.collect::<Vec<_>>();
+                let mut help_args = command_args.iter();
+                while let Some(arg) = help_args.next() {
+                    if (arg == "--root"
+                        && matches!(
+                            command.as_str(),
+                            "discover" | "validate" | "show-skill" | "explain"
+                        ))
+                        || (arg == "--format"
+                            && matches!(command.as_str(), "get-many" | "show-skill"))
+                    {
+                        help_args.next();
+                    } else if arg == "-h" || arg == "--help" {
+                        return Err(CliError::Help(help));
+                    }
+                }
+                let mut args = command_args.into_iter();
                 if command == "explain" {
                     return explain(explicit_config, args);
                 }
@@ -75,9 +221,6 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 }
                 if command == "discover" {
                     return discover(explicit_config, args);
-                }
-                if command != "get" {
-                    return Err(CliError::Usage(format!("unknown command '{command}'")));
                 }
                 let key = args
                     .next()
