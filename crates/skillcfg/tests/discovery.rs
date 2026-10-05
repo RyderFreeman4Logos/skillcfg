@@ -230,6 +230,50 @@ fn global_validation_strict_links_aliases_and_single_skill_isolation() {
 }
 
 #[test]
+fn explain_reports_manifest_lines_for_toml_assignment_forms() {
+    let f = Fixture::new();
+    let skill = f.skill("root/review", "review");
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\n[values]\nok = \"present\"\n").unwrap();
+    let cases = [
+        (
+            "schema_version = 1\n[visible] # accepted comment\nalias = \"values.ok\"\n",
+            3,
+        ),
+        (
+            "schema_version = 1\n[\"visible\"]\nalias = \"values.ok\"\n",
+            3,
+        ),
+        ("schema_version = 1\nvisible.alias = \"values.ok\"\n", 2),
+        (
+            "schema_version = 1\nvisible = { alias = \"values.ok\" }\n",
+            2,
+        ),
+    ];
+    for (manifest, line) in cases {
+        fs::write(skill.join("skillcfg.toml"), manifest).unwrap();
+        let out = f.run(&[
+            "--config",
+            text(&config),
+            "explain",
+            "values.ok",
+            "--root",
+            text(&f.0.join("root")),
+        ]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            stdout.contains(&format!("skillcfg.toml:{line}")),
+            "{stdout}"
+        );
+    }
+}
+
+#[test]
 fn explain_lists_only_requested_manifest_and_literal_consumers() {
     let f = Fixture::new();
     let a = f.skill("root/a", "a");

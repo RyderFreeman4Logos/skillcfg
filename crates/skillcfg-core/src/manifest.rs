@@ -10,6 +10,18 @@ pub struct Binding {
     /// One-based assignment line in the manifest.
     pub line: usize,
 }
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct VisibleSource {
+    visible: Option<BTreeMap<String, toml::Spanned<toml::Value>>>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct OpaqueSource {
+    opaque: Option<BTreeMap<String, toml::Spanned<toml::Value>>>,
+}
+
 /// Optional manifest. Alias maps are sorted; opaque bindings are never selected implicitly.
 #[derive(Debug, Default)]
 pub struct Manifest {
@@ -41,6 +53,8 @@ impl Manifest {
     /// shared across visible/opaque fail admission. No values are included in errors.
     pub fn parse(source: &str) -> Result<Self, String> {
         let config = Config::parse(source).map_err(|e| e.to_string())?;
+        let visible_locations = toml::from_str::<VisibleSource>(source).ok();
+        let opaque_locations = toml::from_str::<OpaqueSource>(source).ok();
         let mut manifest = Self::default();
         for (class, bindings) in [
             ("visible", &mut manifest.visible),
@@ -66,11 +80,26 @@ impl Manifest {
                     let key = key.parse::<ConfigKey>().map_err(|_| {
                         format!("invalid canonical key in manifest {class}.{alias}")
                     })?;
+                    let span = match class {
+                        "visible" => visible_locations
+                            .as_ref()
+                            .and_then(|locations| locations.visible.as_ref())
+                            .and_then(|aliases| aliases.get(alias)),
+                        "opaque" => opaque_locations
+                            .as_ref()
+                            .and_then(|locations| locations.opaque.as_ref())
+                            .and_then(|aliases| aliases.get(alias)),
+                        _ => None,
+                    };
+                    let location = span
+                        .and_then(|value| source.get(..value.span().start))
+                        .map(|prefix| prefix.bytes().filter(|byte| *byte == b'\n').count() + 1)
+                        .ok_or_else(|| format!("cannot locate manifest {class}.{alias} source"))?;
                     bindings.insert(
                         alias.clone(),
                         Binding {
                             key,
-                            line: assignment_line(source, class, alias),
+                            line: location,
                         },
                     );
                 }
@@ -87,23 +116,6 @@ impl Manifest {
         }
         Ok(manifest)
     }
-}
-fn assignment_line(source: &str, class: &str, alias: &str) -> usize {
-    let mut section = "";
-    for (index, line) in source.lines().enumerate() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            section = line.trim_matches(['[', ']']);
-        }
-        if section == class
-            && line
-                .split_once('=')
-                .is_some_and(|(a, _)| a.trim().trim_matches(['\'', '"']) == alias)
-        {
-            return index + 1;
-        }
-    }
-    1
 }
 /// Compact JSON string escaping, also used to quote ambiguous KV strings.
 pub fn quote(value: &str) -> String {
