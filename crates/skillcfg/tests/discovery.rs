@@ -139,6 +139,96 @@ fn show_skill_defaults_to_visible_with_optional_linked_manifest() {
     }
 }
 
+#[test]
+fn validation_reports_literal_locations_and_dynamic_unknowns_without_values() {
+    let f = Fixture::new();
+    let skill = f.skill("skill", "demo");
+    let config = f.0.join("config.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[values]\nok = \"SYNTHETIC_PRIVATE_CANARY\"\n",
+    )
+    .unwrap();
+    fs::write(
+        skill.join("skillcfg.toml"),
+        "schema_version = 1\n[opaque]\nmodel = \"values.ok\"\n",
+    )
+    .unwrap();
+    fs::create_dir(skill.join("scripts")).unwrap();
+    let script = skill.join("scripts/run");
+    fs::write(&script, "# skillcfg get nonexistent.comment\necho 'skillcfg get nonexistent.text'\nmodel=\"$(skillcfg get values.ok)\"\nskillcfg get values.typo\nskillcfg get \"$prefix.dynamic\"\n").unwrap();
+    let out = f.run(&["--config", text(&config), "validate-skill", text(&skill)]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    for needle in ["scripts/run", ":4", "values.typo", "unverifiable"] {
+        assert!(stderr.contains(needle), "{stderr}");
+    }
+    for needle in [
+        "SYNTHETIC_PRIVATE_CANARY",
+        "nonexistent.comment",
+        "nonexistent.text",
+        "prefix.dynamic",
+    ] {
+        assert!(!stderr.contains(needle), "{stderr}");
+    }
+    fs::write(&script, "skillcfg get 'values.ok'\n").unwrap();
+    let out = f.run(&["--config", text(&config), "validate-skill", text(&skill)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "ok\n");
+    fs::write(
+        skill.join("skillcfg.toml"),
+        "schema_version = 1\n[visible]\nmissing = \"values.absent\"\n",
+    )
+    .unwrap();
+    let out = f.run(&["--config", text(&config), "validate-skill", text(&skill)]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("skillcfg.toml:3"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("values.absent"));
+}
+
+#[test]
+fn global_validation_strict_links_aliases_and_single_skill_isolation() {
+    let f = Fixture::new();
+    let skill = f.skill("root/a", "a");
+    let other = f.skill("root/b", "b");
+    let config = f.0.join("config.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[discovery]\nroots = [\"root\"]\n",
+    )
+    .unwrap();
+    symlink("gone", other.join("broken")).unwrap();
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "validate-skill",
+        text(&skill),
+        "--strict",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = f.run(&["--config", text(&config), "validate", "--strict"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("broken"));
+    fs::write(
+        skill.join("skillcfg.toml"),
+        "schema_version = 1\n[visible]\nx = \"schema_version\"\nx = \"schema_version\"\n",
+    )
+    .unwrap();
+    let out = f.run(&["--config", text(&config), "validate-skill", text(&skill)]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid TOML"));
+}
+
 fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }

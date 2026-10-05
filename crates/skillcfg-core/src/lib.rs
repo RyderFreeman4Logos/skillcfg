@@ -2,6 +2,8 @@
 pub mod discovery;
 /// Skill-local dependencies and reversible batch output.
 pub mod manifest;
+/// Static skill validation and source-located references.
+pub mod validate;
 
 use std::{
     error::Error as StdError,

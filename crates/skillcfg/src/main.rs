@@ -9,10 +9,10 @@ use std::{
 use skillcfg_core::{
     Config, ConfigKey, discovery,
     manifest::{Manifest, render_pairs},
-    render_value,
+    render_value, validate,
 };
 
-const USAGE: &str = "Usage: skillcfg [--config PATH] <command> [options]\nCommands: get KEY | get-many KEY... [--format kv|json] | show-skill NAME [--all] [--format kv|json] | discover [--root PATH]... [--verbose]";
+const USAGE: &str = "Usage: skillcfg [--config PATH] <command> [options]\nCommands: get KEY | get-many KEY... [--format kv|json] | show-skill NAME [--all] [--format kv|json] | discover [--root PATH]... [--verbose] | validate [--root PATH]... [--strict] | validate-skill PATH [--strict]";
 
 #[derive(Debug)]
 enum CliError {
@@ -64,6 +64,9 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let command = command
                     .into_string()
                     .map_err(|_| CliError::Usage("command name must be valid UTF-8".to_owned()))?;
+                if command == "validate" || command == "validate-skill" {
+                    return validate_command(explicit_config, &command, args);
+                }
                 if command == "get-many" || command == "show-skill" {
                     return batch(explicit_config, &command, args);
                 }
@@ -285,6 +288,69 @@ fn report(result: &discovery::Discovery, strict: bool) -> Result<(), CliError> {
     } else {
         Ok(())
     }
+}
+
+fn validate_command(
+    explicit_config: Option<PathBuf>,
+    command: &str,
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(), CliError> {
+    let mut strict = false;
+    let mut roots = Vec::new();
+    let mut skill_path = None;
+    while let Some(arg) = args.next() {
+        if arg == "--strict" {
+            strict = true;
+        } else if arg == "--root" && command == "validate" {
+            roots.push(PathBuf::from(
+                args.next()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| CliError::Usage("--root requires a nonempty path".to_owned()))?,
+            ));
+        } else if command == "validate-skill"
+            && skill_path.is_none()
+            && !arg.to_string_lossy().starts_with('-')
+        {
+            skill_path = Some(PathBuf::from(arg));
+        } else {
+            return Err(CliError::Usage(format!(
+                "unsupported argument for {command}"
+            )));
+        }
+    }
+    if command == "validate-skill" && skill_path.is_none() {
+        return Err(CliError::Usage(
+            "validate-skill requires a skill directory".to_owned(),
+        ));
+    }
+    let path = config_path(explicit_config)?;
+    let config = Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?;
+    let single = skill_path
+        .as_ref()
+        .map(std::fs::canonicalize)
+        .transpose()
+        .map_err(|e| CliError::Failure(format!("cannot resolve skill directory: {e}")))?;
+    let mut result = if let Some(skill_path) = skill_path {
+        discovery::discover(&[skill_path], &[], true)
+    } else {
+        find_skills(&config, &path, roots)?
+    };
+    if let Some(single) = single {
+        result.skills.retain(|s| s.canonical_dir == single);
+        if result.skills.is_empty() {
+            return Err(CliError::Failure(format!(
+                "skill directory {:?} has no readable SKILL.md",
+                single
+            )));
+        }
+    }
+    for skill in &result.skills {
+        result
+            .diagnostics
+            .extend(validate::analyze(skill, &config).diagnostics);
+    }
+    report(&result, strict)?;
+    write_output("ok\n")
 }
 
 fn write_output(rendered: &str) -> Result<(), CliError> {

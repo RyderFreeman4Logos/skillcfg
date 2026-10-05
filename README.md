@@ -40,6 +40,12 @@ model = "model_tiers.review.model_id"
 
 `skillcfg get-many key.one key.two [--format kv|json]` resolves all requested keys before writing and preserves input order; duplicates fail. Default KV has one `key=value` line per binding. Plain, unambiguous strings are unquoted; empty strings, leading/trailing whitespace, control characters, JSON-looking strings, boolean/null spellings and numeric strings are JSON-quoted. Numbers/bools use natural text; arrays/tables use compact JSON. JSON preserves TOML value types (datetimes become strings); non-finite floats are rejected in either batch mode. Treat KV as data, never `eval` it. Explicit `get` and `get-many` intentionally disclose requested values for scripts; `show-skill` never includes opaque values by default. This is preference storage, not a secret manager.
 
+## Validation
+
+`skillcfg validate [--root PATH]... [--strict]` checks the config, discovered skills, manifests and scripts. `skillcfg validate-skill PATH [--strict]` checks just that skill without traversing configured roots. Successful validation prints `ok`; errors leave stdout empty, report path/line and key on stderr, and exit 1. Usage errors exit 2. Warnings do not fail unless `--strict` is requested.
+
+Checks include missing manifest keys, duplicate aliases, collisions, broken links, literal script key existence, undeclared script keys, statically unused opaque dependencies and non-executable shebang scripts. Visible dependencies need not appear in scripts. The read-only scanner recognizes line-local `skillcfg get literal.key`, quoted literal keys, and shell command substitutions. Comments and ordinary quoted strings are skipped. Dynamic keys, unsupported invocation syntax and options are reported as unverifiable, never guessed or executed. This is not a Bash parser, execution tracer or workflow validator; complex/multiline shell scripts still require skill-owned tests. Error output never includes resolved values or source excerpts.
+
 ## Development
 
 Install both local hooks with `lefthook install`. `just check` is the fast pre-commit fmt/clippy check. After committing, run the full gate once on a clean HEAD:
