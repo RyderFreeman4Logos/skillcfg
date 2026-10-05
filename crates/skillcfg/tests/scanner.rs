@@ -423,6 +423,56 @@ fn scanner_lexical_class_matrix_through_validate_and_explain() {
             "echo '\nskillcfg get values.missing\n",
             &[(1, None)],
         ),
+        (
+            "continued array assignment",
+            "args=\\\n(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "continued append array assignment",
+            "args+=\\\n(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "continued array active substitution",
+            "args=\\\n($(skillcfg get \"$DYNAMIC\"))\n",
+            &[(2, None)],
+        ),
+        (
+            "continued scalar assignment name",
+            "args\\\n=x skillcfg get \"$DYNAMIC\"\n",
+            &[(2, None)],
+        ),
+        (
+            "continued numeric descriptor adjacency",
+            "2\\\n>/dev/null skillcfg get \"$DYNAMIC\"\n",
+            &[(2, None)],
+        ),
+        (
+            "continued named descriptor adjacency",
+            "{fd}\\\n>/dev/null skillcfg get \"$DYNAMIC\"\n",
+            &[(2, None)],
+        ),
+        (
+            "continued array whitespace barrier",
+            "args= \\\n(skillcfg get values.ok)\n",
+            &[(2, Some("values.ok"))],
+        ),
+        (
+            "arithmetic backtick command substitution",
+            "n=$(( `skillcfg get \"$DYNAMIC\"` ))\n",
+            &[(1, None)],
+        ),
+        (
+            "arithmetic command backtick substitution",
+            "(( `skillcfg get \"$DYNAMIC\"` ))\n",
+            &[(1, None)],
+        ),
+        (
+            "arithmetic dollar substitution control",
+            "n=$(( $(skillcfg get \"$DYNAMIC\") ))\n",
+            &[(1, None)],
+        ),
     ];
     let mut failures = Vec::new();
     for (name, source, expected) in cases {

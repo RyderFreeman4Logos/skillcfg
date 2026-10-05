@@ -19,6 +19,8 @@ struct Word {
     escaped: bool,
     plain: bool,
     assignment: bool,
+    terminal: Option<u8>,
+    end: usize,
     line: usize,
 }
 impl Word {
@@ -33,18 +35,53 @@ impl Word {
     }
     // Assignment is a source role, not a property of the quote-decoded value.
     fn assignment(source: &[u8]) -> bool {
-        let name = Self::name_length(source);
-        if name == 0 {
+        let mut at = 0;
+        while source[at..].starts_with(b"\\\n") {
+            at += 2;
+        }
+        let Some(&first) = source.get(at) else {
+            return false;
+        };
+        if first != b'_' && !first.is_ascii_alphabetic() {
             return false;
         }
-        let mut rest = &source[name..];
-        if rest.starts_with(b"[") {
-            let Some(end) = rest.iter().position(|b| *b == b']') else {
+        at += 1;
+        loop {
+            while source[at..].starts_with(b"\\\n") {
+                at += 2;
+            }
+            let Some(&byte) = source.get(at) else {
+                break;
+            };
+            if byte == b'_' || byte.is_ascii_alphabetic() || byte.is_ascii_digit() {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        while source[at..].starts_with(b"\\\n") {
+            at += 2;
+        }
+        if source.get(at) == Some(&b'[') {
+            let Some(end) = source[at..].iter().position(|byte| *byte == b']') else {
                 return false;
             };
-            rest = &rest[end + 1..];
+            at += end + 1;
         }
-        rest.starts_with(b"=") || rest.starts_with(b"+=")
+        while source[at..].starts_with(b"\\\n") {
+            at += 2;
+        }
+        if source.get(at) == Some(&b'=') {
+            return true;
+        }
+        if source.get(at) == Some(&b'+') {
+            at += 1;
+            while source[at..].starts_with(b"\\\n") {
+                at += 2;
+            }
+            return source.get(at) == Some(&b'=');
+        }
+        false
     }
 }
 struct Lexer<'a> {
@@ -128,8 +165,9 @@ impl Lexer<'_> {
                         continue;
                     }
                     let compound = data
-                        || (self.source.get(self.at.wrapping_sub(1)) == Some(&b'=')
-                            && words.last().is_some_and(|w: &Word| w.assignment));
+                        || words.last().is_some_and(|w: &Word| {
+                            w.assignment && w.terminal == Some(b'=') && w.end == self.at
+                        });
                     if !compound {
                         self.invocation(&words, redirected, data);
                         words.clear();
@@ -145,20 +183,18 @@ impl Lexer<'_> {
                 }
                 b'<' | b'>' => {
                     // Adjacent unquoted numeric/named descriptors are operator roles, not argv.
-                    if self.at > 0
-                        && !self.source[self.at - 1].is_ascii_whitespace()
-                        && words.last().is_some_and(|w| {
-                            w.plain
-                                && (w.text.bytes().all(|b| b.is_ascii_digit())
-                                    || w.text
-                                        .strip_prefix('{')
-                                        .and_then(|s| s.strip_suffix('}'))
-                                        .is_some_and(|name| {
-                                            !name.is_empty()
-                                                && Word::name_length(name.as_bytes()) == name.len()
-                                        }))
-                        })
-                    {
+                    if words.last().is_some_and(|w| {
+                        w.end == self.at
+                            && w.plain
+                            && (w.text.bytes().all(|b| b.is_ascii_digit())
+                                || w.text
+                                    .strip_prefix('{')
+                                    .and_then(|s| s.strip_suffix('}'))
+                                    .is_some_and(|name| {
+                                        !name.is_empty()
+                                            && Word::name_length(name.as_bytes()) == name.len()
+                                    }))
+                    }) {
                         words.pop();
                     }
                     redirected |= words.is_empty();
@@ -230,6 +266,17 @@ impl Lexer<'_> {
         }
     }
 
+    fn command_substitution(&mut self, end: u8, depth: usize, conservative: bool) -> bool {
+        let first = self.references.len();
+        let closed = self.commands(Some(end), depth + 1, &mut Vec::new(), false);
+        if conservative || !closed {
+            for (_, key) in &mut self.references[first..] {
+                *key = None;
+            }
+        }
+        closed
+    }
+
     fn word(&mut self, delimiter: bool, end: Option<u8>, depth: usize) -> Option<Word> {
         let start = self.at;
         let line = self.line;
@@ -238,6 +285,7 @@ impl Lexer<'_> {
         let mut dynamic = false;
         let mut escaped = false;
         let mut plain = true;
+        let mut terminal = None;
         while let Some(&byte) = self.source.get(self.at) {
             if quote.is_none()
                 && (byte.is_ascii_whitespace() || b";|&()< >".contains(&byte) || Some(byte) == end)
@@ -256,51 +304,51 @@ impl Lexer<'_> {
                 if let Some(&next) = self.source.get(self.at) {
                     if next == b'\n' {
                         self.advance();
-                    } else if quote == Some(b'"') && !b"$`\"\\".contains(&next) {
-                        text.push(b'\\');
                     } else {
-                        text.push(next);
-                        escaped |= !delimiter;
-                        plain = false;
-                        self.advance();
+                        terminal = None;
+                        if quote == Some(b'"') && !b"$`\"\\".contains(&next) {
+                            text.push(b'\\');
+                        } else {
+                            text.push(next);
+                            escaped |= !delimiter;
+                            plain = false;
+                            self.advance();
+                        }
                     }
                 } else {
                     dynamic = true;
+                    terminal = None;
                 }
             } else if Some(byte) == quote {
                 quote = None;
                 self.advance();
             } else if quote.is_none() && matches!(byte, b'\'' | b'"') {
                 plain = false;
+                terminal = None;
                 quote = Some(byte);
                 self.advance();
             } else if !delimiter && self.starts(b"$((") {
                 dynamic = true;
+                terminal = None;
                 self.at += 3;
                 self.arithmetic(depth);
             } else if !delimiter && (self.starts(b"$(") || byte == b'`') {
                 dynamic = true;
                 let backtick = byte == b'`';
-                let first = self.references.len();
                 let substitution_line = self.line;
                 self.at += if backtick { 1 } else { 2 };
-                let closed = self.commands(
-                    Some(if backtick { b'`' } else { b')' }),
-                    depth + 1,
-                    &mut Vec::new(),
-                    false,
-                );
-                if backtick || !closed {
-                    for (_, key) in &mut self.references[first..] {
-                        *key = None;
-                    }
-                }
+                terminal = None;
+                let closed =
+                    self.command_substitution(if backtick { b'`' } else { b')' }, depth, backtick);
                 if !closed {
                     self.unknown(substitution_line);
                 }
             } else {
                 dynamic |= !delimiter && matches!(byte, b'$' | b'*' | b'?' | b'[' | b'~');
                 text.push(byte);
+                if quote.is_none() {
+                    terminal = Some(byte);
+                }
                 self.advance();
             }
         }
@@ -314,6 +362,8 @@ impl Lexer<'_> {
             escaped,
             plain: plain && !dynamic,
             assignment: Word::assignment(&self.source[start..self.at]),
+            terminal,
+            end: self.at,
             line,
         })
     }
@@ -329,12 +379,11 @@ impl Lexer<'_> {
                 return;
             }
             if self.starts(b"$(") && !self.starts(b"$((") {
-                let first = self.references.len();
                 self.at += 2;
-                self.commands(Some(b')'), depth + 1, &mut Vec::new(), false);
-                for (_, key) in &mut self.references[first..] {
-                    *key = None;
-                }
+                self.command_substitution(b')', depth, true);
+            } else if byte == b'`' {
+                self.advance();
+                self.command_substitution(b'`', depth, true);
             } else if byte == b'\\' {
                 self.advance();
                 if self.at < self.source.len() {
