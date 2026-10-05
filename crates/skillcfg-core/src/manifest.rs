@@ -151,6 +151,7 @@ pub fn render_pairs(pairs: &[(&str, &toml::Value)], json: bool) -> Result<String
 }
 fn json_value(value: &toml::Value) -> Result<serde_json::Value, String> {
     match value {
+        toml::Value::Datetime(value) => Ok(serde_json::Value::String(value.to_string())),
         toml::Value::Float(f) if !f.is_finite() => {
             Err("non-finite floats cannot be represented in batch JSON/KV".to_owned())
         }

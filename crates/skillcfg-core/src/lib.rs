@@ -101,6 +101,19 @@ impl Config {
 
     /// Read a UTF-8 file (following symlinks), then parse it; errors retain the path.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let metadata = fs::metadata(path).map_err(|source| ConfigError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        if !metadata.is_file() {
+            return Err(ConfigError::Read {
+                path: path.to_owned(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "config must be a regular file",
+                ),
+            });
+        }
         let source = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
             source,
@@ -155,6 +168,12 @@ impl FromStr for ConfigKey {
     }
 }
 
+/// Display a filesystem path without allowing control bytes to inject diagnostic lines.
+/// Non-UTF-8 components use the same lossy representation as std Path::display.
+pub fn display_path(path: &Path) -> String {
+    path.to_string_lossy().escape_debug().to_string()
+}
+
 /// Render strings verbatim (including existing newlines), other values as TOML text.
 /// Arrays/tables use inline TOML. No output newline is added; the CLI owns that policy.
 pub fn render_value(value: &toml::Value) -> String {
@@ -180,14 +199,14 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read { path, source } => {
-                write!(f, "cannot read config '{}': {source}", path.display())
+                write!(f, "cannot read config '{}': {source}", display_path(path))
             }
             Self::Parse(Some((line, column))) => {
                 write!(f, "invalid TOML at line {line}, column {column}")
             }
             Self::Parse(None) => write!(f, "invalid TOML"),
             Self::AtPath { path, source } => {
-                write!(f, "{source} in config '{}'", path.display())
+                write!(f, "{source} in config '{}'", display_path(path))
             }
             Self::UnsupportedSchema { found } => {
                 write!(f, "unsupported schema_version {found}; expected integer 1")

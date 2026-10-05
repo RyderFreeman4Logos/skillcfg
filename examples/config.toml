@@ -1,7 +1,11 @@
 schema_version = 1
 
+[discovery]
+roots = ["skills"]
+
 [demo]
 message = "hello from skillcfg"
+timeout = "2s"
 attempts = 3
 enabled = true
 ratio = 0.5

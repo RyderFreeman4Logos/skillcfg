@@ -2,6 +2,7 @@
 use crate::{
     Config, ConfigKey,
     discovery::{Diagnostic, Skill},
+    display_path,
     manifest::Manifest,
 };
 use std::{
@@ -61,7 +62,7 @@ pub fn analyze(skill: &Skill, config: &Config) -> Analysis {
         scan_files(&scripts, &mut BTreeSet::new(), &mut result);
     }
     for reference in &result.references {
-        let location = format!("{}:{}", reference.path.display(), reference.line);
+        let location = format!("{}:{}", display_path(&reference.path), reference.line);
         if let Some(key) = &reference.key {
             if let Err(error) = config.get(key) {
                 result.diagnostics.push(Diagnostic {
@@ -100,7 +101,7 @@ pub fn analyze(skill: &Skill, config: &Config) -> Analysis {
                 error: false,
                 message: format!(
                     "{}:{}: opaque dependency {alias:?} not statically used",
-                    manifest_path.display(),
+                    display_path(&manifest_path),
                     binding.line
                 ),
             });
@@ -215,7 +216,19 @@ fn scan_files(path: &Path, visited: &mut BTreeSet<PathBuf>, result: &mut Analysi
 /// ponytail: line-local lexer, not a Bash AST; multiline/complex shell programs need their own tests.
 pub fn scan_source(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
     let mut references = Vec::new();
+    let mut heredoc: Option<(String, bool)> = None;
     for (index, line) in source.lines().enumerate() {
+        if let Some((delimiter, strip_tabs)) = &heredoc {
+            let candidate = if *strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if candidate == delimiter {
+                heredoc = None;
+            }
+            continue;
+        }
         let bytes = line.as_bytes();
         let (mut at, mut quote, mut start) = (0, None, true);
         while at < bytes.len() {
@@ -236,6 +249,21 @@ pub fn scan_source(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
                 }
                 at += 1;
                 continue;
+            }
+            if bytes[at..].starts_with(b"<<") {
+                // A here-document may contain data or executable code; neither is a definite consumer.
+                references.push((index + 1, None));
+                let tail = &line[at + 2..];
+                if !tail.starts_with('<') {
+                    let strip_tabs = tail.starts_with('-');
+                    let tail = if strip_tabs { &tail[1..] } else { tail };
+                    if let Some((delimiter, _, dynamic)) = word(tail) {
+                        if !dynamic && !delimiter.is_empty() {
+                            heredoc = Some((delimiter, strip_tabs));
+                        }
+                    }
+                }
+                break;
             }
             if b == b'#' && (at == 0 || bytes[at - 1].is_ascii_whitespace()) {
                 break;

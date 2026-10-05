@@ -7,7 +7,7 @@ use std::{
 };
 
 use skillcfg_core::{
-    Config, ConfigKey, discovery,
+    Config, ConfigKey, discovery, display_path,
     manifest::{Manifest, render_pairs},
     render_value, validate,
 };
@@ -158,8 +158,20 @@ fn discover(
     for skill in &result.skills {
         if verbose {
             output.push_str(&format!(
-                "{}\t{:?}\t{:?}\n",
-                skill.name, skill.canonical_dir, skill.exposures
+                "{}\t{:?}\t{:?}\tSKILL.md={:?}\tmanifest={:?}\tsymlink_exposures={:?}\n",
+                skill.name,
+                skill.canonical_dir,
+                skill.exposures,
+                skill.canonical_dir.join("SKILL.md"),
+                skill.canonical_dir.join("skillcfg.toml"),
+                skill
+                    .exposures
+                    .iter()
+                    .map(|p| (
+                        p,
+                        std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+                    ))
+                    .collect::<Vec<_>>()
             ));
         } else {
             output.push_str(&format!("{}\n", skill.name));
@@ -420,7 +432,7 @@ fn explain(
             output.push_str(&format!(
                 "{}\t{}:{}\t{}\n",
                 skill,
-                r.path.display(),
+                display_path(&r.path),
                 r.line,
                 r.origin
             ));
@@ -434,7 +446,7 @@ fn explain(
                 output.push_str(&format!(
                     "unknown\t{}\t{}:{}\n",
                     skill,
-                    r.path.display(),
+                    display_path(&r.path),
                     r.line
                 ));
             }

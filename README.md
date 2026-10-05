@@ -1,16 +1,26 @@
 # skillcfg
 
-Agent-independent runtime configuration for skills. This first phase provides a small Rust library and a script-friendly `get` command backed by one shared TOML file.
+Agent-independent runtime preferences for skills. A small headless Rust core discovers consumers, resolves shared TOML values, validates static dependencies and reports impact; the CLI never executes skill behavior.
 
 ## Quick start
 
 ```sh
-just get demo.message
+just build
+export PATH="$PWD/target/debug:$PATH"
+export SKILLCFG_CONFIG="$PWD/examples/config.toml"
+skillcfg get demo.message
+skillcfg get-many demo.attempts demo.enabled --format json
+skillcfg discover --verbose
+skillcfg show-skill report
+skillcfg explain demo.timeout
+skillcfg validate --strict
+skillcfg validate-skill examples/skills/report --strict
+examples/skills/report/scripts/report 'sample report'
 ```
 
-This builds and runs the CLI against [`examples/config.toml`](examples/config.toml), printing `hello from skillcfg` to stdout. Choose another config explicitly with `skillcfg --config PATH get demo.message`.
+This builds the CLI and runs all seven commands against [`examples/config.toml`](examples/config.toml) and one portable skill-owned script. `get` prints `hello from skillcfg`; the script prints `sample report` under a centrally supplied deadline without exposing that deadline first. Change the one central value to affect every referencing skill. Choose another config explicitly with `skillcfg --config PATH get demo.message`.
 
-Configuration paths are selected in this order: `--config`, `SKILLCFG_CONFIG`, `$XDG_CONFIG_HOME/skillcfg/config.toml`, then `$HOME/.config/skillcfg/config.toml`. Unset environment variables fall through; a selected but empty `SKILLCFG_CONFIG` or `XDG_CONFIG_HOME` is an error, not a fallback. The file may be a symlink. It must contain integer `schema_version = 1`.
+Configuration paths are selected in this order: `--config`, `SKILLCFG_CONFIG`, `$XDG_CONFIG_HOME/skillcfg/config.toml`, then `$HOME/.config/skillcfg/config.toml`. Unset environment variables fall through; a selected but empty `SKILLCFG_CONFIG` or `XDG_CONFIG_HOME` is an error, not a fallback. The file may be a symlink to a regular UTF-8 file; directories/devices/FIFOs are rejected. It must contain integer `schema_version = 1`.
 
 Keys such as `demo.message` are literal dotted paths: each nonempty segment contains only ASCII letters, digits, `_`, or `-`. Quoted segments, Unicode segments, and escaping dots are not supported; dots always traverse tables.
 
@@ -18,7 +28,7 @@ Keys such as `demo.message` are literal dotted paths: each nonempty segment cont
 
 ## Discovery
 
-`skillcfg discover [--root PATH]... [--verbose]` lists logical names, sorted by name then canonical directory. Verbose output is one tab-separated row per skill: name, debug-quoted canonical path, debug-quoted exposure list. Aliases of one canonical directory merge; distinct directories with the same name fail with both paths/exposures on stderr.
+`skillcfg discover [--root PATH]... [--verbose]` lists logical names, sorted by name then canonical directory. Verbose output is one tab-separated row per skill: name, debug-quoted canonical path, debug-quoted exposure list, SKILL.md path, optional manifest path and per-exposure symlink status. Aliases of one canonical directory merge; distinct directories with the same name fail with both paths/exposures on stderr.
 
 Optional `[discovery] roots = ["~/skills", "relative/root"]` selects roots in the shared config. Relative paths use the config's lexical parent, not the process cwd. Explicit CLI roots replace configured roots. Without configured roots, only `~/.{codex,hermes,claude,agents}/skills` are searched; missing conventional roots are silent, missing explicit roots fail. Discovery can run without a config file.
 
@@ -44,7 +54,7 @@ model = "model_tiers.review.model_id"
 
 `skillcfg validate [--root PATH]... [--strict]` checks the config, discovered skills, manifests and scripts. `skillcfg validate-skill PATH [--strict]` checks just that skill without traversing configured roots. Successful validation prints `ok`; errors leave stdout empty, report path/line and key on stderr, and exit 1. Usage errors exit 2. Warnings do not fail unless `--strict` is requested.
 
-Checks include missing manifest keys, duplicate aliases, collisions, broken links, literal script key existence, undeclared script keys, statically unused opaque dependencies and non-executable shebang scripts. Visible dependencies need not appear in scripts. The read-only scanner recognizes line-local `skillcfg get literal.key`, quoted literal keys, and shell command substitutions. Comments and ordinary quoted strings are skipped. Dynamic keys, unsupported invocation syntax and options are reported as unverifiable, never guessed or executed. This is not a Bash parser, execution tracer or workflow validator; complex/multiline shell scripts still require skill-owned tests. Error output never includes resolved values or source excerpts.
+Checks include missing manifest keys, duplicate aliases, collisions, broken links, literal script key existence, undeclared script keys, statically unused opaque dependencies and non-executable shebang scripts. Visible dependencies need not appear in scripts. The read-only scanner recognizes line-local `skillcfg get literal.key`, quoted literal keys, and shell command substitutions. Comments and ordinary quoted strings are skipped. Dynamic keys, unsupported invocation syntax and options are reported as unverifiable, never guessed or executed. Here-document bodies are skipped and their declarations marked unknown. This is not a Bash parser, execution tracer or workflow validator; complex/multiline shell scripts still require skill-owned tests. Error output never includes resolved values or source excerpts.
 
 ## Impact inspection
 

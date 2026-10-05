@@ -77,6 +77,9 @@ pub fn settings(
         }
     }
     if !configured {
+        if home.as_os_str().is_empty() {
+            return Err("HOME is required for conventional discovery roots".to_owned());
+        }
         roots = [".codex", ".hermes", ".claude", ".agents"]
             .map(|agent| home.join(agent).join("skills"))
             .to_vec();
@@ -85,6 +88,9 @@ pub fn settings(
 }
 /// Expand only `~` and `~/`; other tilde forms fail rather than naming the wrong user.
 pub fn expand_path(value: &str, home: &Path) -> Result<PathBuf, String> {
+    if (value == "~" || value.starts_with("~/")) && home.as_os_str().is_empty() {
+        return Err("HOME is required for ~ expansion".to_owned());
+    }
     if value == "~" {
         Ok(home.to_owned())
     } else if let Some(rest) = value.strip_prefix("~/") {
@@ -102,6 +108,13 @@ pub fn discover(roots: &[PathBuf], ignores: &[String], explicit: bool) -> Discov
     let mut skills = BTreeMap::<PathBuf, Skill>::new();
     let mut diagnostics = Vec::new();
     for root in roots {
+        if explicit && fs::metadata(root).is_ok_and(|m| !m.is_dir()) {
+            diagnostics.push(Diagnostic {
+                error: true,
+                message: format!("discovery root must be a directory: {:?}", root),
+            });
+            continue;
+        }
         if !explicit
             && fs::symlink_metadata(root).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
         {

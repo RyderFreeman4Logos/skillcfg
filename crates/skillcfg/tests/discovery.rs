@@ -278,6 +278,273 @@ fn explain_lists_only_requested_manifest_and_literal_consumers() {
     assert!(out.stdout.is_empty());
 }
 
+#[test]
+fn scanner_does_not_claim_heredoc_text_or_backtick_shell_as_literals() {
+    let source = "cat <<'DOC'\nskillcfg get fake.heredoc\nDOC\n# comment\necho \"skillcfg get fake.string\"\nskillcfg get real.literal\nskillcfg get `printf dynamic.key`\n";
+    let references = skillcfg_core::validate::scan_source(source);
+    assert!(
+        !references
+            .iter()
+            .any(|(_, k)| k.as_ref().is_some_and(|k| k.as_str() == "fake.heredoc"))
+    );
+    assert!(references.iter().any(|(line,k)| *line == 6 && k.as_ref().is_some_and(|k| k.as_str() == "real.literal")));
+    assert!(references.iter().any(|(line, k)| *line == 7 && k.is_none()));
+}
+
+#[test]
+fn graph_matrix_relative_absolute_multihop_deleted_and_file_roots() {
+    let f = Fixture::new();
+    let skill = f.skill("canonical/shared", "shared");
+    fs::create_dir(f.0.join("root")).unwrap();
+    symlink("../canonical/shared", f.0.join("root/relative")).unwrap();
+    symlink(&skill, f.0.join("root/absolute")).unwrap();
+    symlink("relative", f.0.join("root/multihop")).unwrap();
+    symlink("missing", f.0.join("root/deleted")).unwrap();
+    symlink("cycle-b", f.0.join("root/cycle-a")).unwrap();
+    symlink("cycle-a", f.0.join("root/cycle-b")).unwrap();
+    let out = f.run(&["discover", "--root", text(&f.0.join("root")), "--verbose"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for needle in [
+        "root/absolute",
+        "root/relative",
+        "root/multihop",
+        "SKILL.md",
+        "manifest",
+        "symlink",
+    ] {
+        assert!(stdout.contains(needle), "{stdout}");
+    }
+    assert!(String::from_utf8_lossy(&out.stderr).contains("deleted"));
+    let out = f.run(&["discover", "--root", text(&skill.join("SKILL.md"))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("directory"));
+}
+
+#[test]
+fn batch_types_escaping_nonfinite_and_manifest_privacy_boundaries() {
+    let f = Fixture::new();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\nwhen = 2026-01-01\n[values]\nempty = \"\"\nspace = \" hi \"\nquote = '\"quoted\"'\nboolean_text = \"true\"\ninteger_text = \"42\"\nfloat = 1.5\nboolean = true\ntable = { n = 3 }\nnotfinite = inf\n").unwrap();
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "get-many",
+        "when",
+        "values.float",
+        "values.boolean",
+        "values.table",
+        "--format",
+        "json",
+    ]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "{\"when\":\"2026-01-01\",\"values.float\":1.5,\"values.boolean\":true,\"values.table\":{\"n\":3}}\n"
+    );
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "get-many",
+        "values.empty",
+        "values.space",
+        "values.quote",
+        "values.boolean_text",
+        "values.integer_text",
+    ]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "values.empty=\"\"\nvalues.space=\" hi \"\nvalues.quote=\"\\\"quoted\\\"\"\nvalues.boolean_text=\"true\"\nvalues.integer_text=\"42\"\n"
+    );
+    for keys in [
+        vec!["values.float", "values.notfinite"],
+        vec!["values.float", "values.float"],
+    ] {
+        let mut args = vec!["--config", text(&config), "get-many"];
+        args.extend(keys);
+        let out = f.run(&args);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+    }
+    let skill = f.skill("root/review", "review");
+    for source in [
+        "schema_version = 1\n[visible]\nx = \"SYNTHETIC_PRIVATE_CANARY..bad\"\n",
+        "schema_version = \"SYNTHETIC_PRIVATE_CANARY\"\n",
+        "schema_version = 1\n[visible]\nx = { value = \"SYNTHETIC_PRIVATE_CANARY\" }\n",
+    ] {
+        fs::write(skill.join("skillcfg.toml"), source).unwrap();
+        let out = f.run(&[
+            "--config",
+            text(&config),
+            "show-skill",
+            "review",
+            "--root",
+            text(&f.0.join("root")),
+        ]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("SYNTHETIC_PRIVATE_CANARY"));
+    }
+}
+
+#[test]
+fn nonregular_config_is_rejected_without_opening_fifo() {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new();
+    let fifo = f.0.join("config.fifo");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_skillcfg"))
+        .args(["--config", text(&fifo), "get", "demo.value"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        status.and_then(|s| s.code()),
+        Some(1),
+        "config FIFO must fail without blocking"
+    );
+}
+
+#[test]
+fn cli_usage_boundaries_and_frontmatter_fallbacks() {
+    let f = Fixture::new();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\nvalue = \"ok\"\n").unwrap();
+    for tail in [
+        vec!["get-many"],
+        vec!["get-many", "a..b"],
+        vec!["get-many", "value", "--format", "raw"],
+        vec!["show-skill"],
+        vec!["validate-skill"],
+        vec!["explain", "a..b"],
+        vec!["get", "value", "extra"],
+        vec!["validate", "--all"],
+        vec!["discover", "--root", ""],
+    ] {
+        let mut args = vec!["--config", text(&config)];
+        args.extend(tail);
+        let out = f.run(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty());
+    }
+    let out = f.run(&["--help"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    for command in [
+        "get",
+        "get-many",
+        "show-skill",
+        "discover",
+        "validate",
+        "validate-skill",
+        "explain",
+    ] {
+        assert!(stdout.contains(command));
+    }
+    let fallback = f.skill("root/fallback", "unused");
+    fs::write(fallback.join("SKILL.md"), "# no frontmatter\n").unwrap();
+    let quoted = f.skill("root/quoted", "unused");
+    fs::write(quoted.join("SKILL.md"), "---\nname: 'quoted-name'\n---\n").unwrap();
+    let out = f.run(&["discover", "--root", text(&f.0.join("root"))]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "fallback\nquoted-name\n"
+    );
+    fs::write(
+        quoted.join("SKILL.md"),
+        "---\nname: SYNTHETIC_PRIVATE_CANARY bad\n---\n",
+    )
+    .unwrap();
+    let out = f.run(&["discover", "--root", text(&f.0.join("root"))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("SYNTHETIC_PRIVATE_CANARY"));
+}
+
+#[test]
+fn defaults_config_ignore_and_deleted_manifest_are_verified() {
+    let f = Fixture::new();
+    for agent in [".codex", ".hermes", ".claude", ".agents"] {
+        f.skill(&format!("{agent}/skills/{agent}"), &agent[1..]);
+    }
+    let out = f.run(&["discover"]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "agents\nclaude\ncodex\nhermes\n"
+    );
+    f.skill("root/keep", "keep");
+    f.skill("root/cache-item", "ignored");
+    let config = f.0.join("config.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[discovery]\nroots = [\"root\"]\nignore = [\"cache*\"]\n",
+    )
+    .unwrap();
+    let out = f.run(&["--config", text(&config), "discover"]);
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "keep\n");
+    symlink("deleted.toml", f.0.join("root/keep/skillcfg.toml")).unwrap();
+    let out = f.run(&["--config", text(&config), "show-skill", "keep"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("manifest"));
+}
+
+#[test]
+fn absent_home_and_control_character_paths_fail_safely() {
+    let settings =
+        skillcfg_core::discovery::settings(None, Path::new("config.toml"), Path::new(""));
+    assert!(
+        settings.is_err(),
+        "missing HOME must not silently scan cwd-relative default roots"
+    );
+    assert!(skillcfg_core::discovery::expand_path("~/skills", Path::new("")).is_err());
+    let f = Fixture::new();
+    let config = f.0.join("private\nforged-diagnostic.toml");
+    fs::write(&config, "schema_version = [").unwrap();
+    let out = f.run(&["--config", text(&config), "get", "value"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "paths must not inject extra diagnostic lines"
+    );
+    assert!(stderr.contains("private\\nforged-diagnostic.toml"));
+}
+
 fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }
