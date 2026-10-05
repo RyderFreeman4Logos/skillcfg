@@ -16,6 +16,14 @@ Keys such as `demo.message` are literal dotted paths: each nonempty segment cont
 
 `get` writes strings verbatim, including their existing newlines; other values use TOML text (arrays/tables use inline TOML). The CLI adds one newline only when the rendered value does not already end with one. The core renderer adds none. Errors go to stderr and return a non-zero status; syntax/schema diagnostics retain path, location or type, not unrelated source values.
 
+## Discovery
+
+`skillcfg discover [--root PATH]... [--verbose]` lists logical names, sorted by name then canonical directory. Verbose output is one tab-separated row per skill: name, debug-quoted canonical path, debug-quoted exposure list. Aliases of one canonical directory merge; distinct directories with the same name fail with both paths/exposures on stderr.
+
+Optional `[discovery] roots = ["~/skills", "relative/root"]` selects roots in the shared config. Relative paths use the config's lexical parent, not the process cwd. Explicit CLI roots replace configured roots. Without configured roots, only `~/.{codex,hermes,claude,agents}/skills` are searched; missing conventional roots are silent, missing explicit roots fail. Discovery can run without a config file.
+
+Directories containing the exact filename `SKILL.md` are candidates, including roots and nested skills. Plain or single/double-quoted frontmatter `name:` takes precedence over the canonical directory basename; names contain ASCII letters/digits/`_`/`-`/`.`. This is not a complete YAML parser. Symlinked roots, categories, skills and Markdown files are followed, including targets outside roots. Broken links/cycles warn and traversal continues; name/read errors fail. Active canonical ancestors stop cycles, with a 256-directory depth ceiling. `.git`, `target`, `node_modules`, `.cache`, and `__pycache__` are skipped. `[discovery] ignore = ["cache*", "scratch?"]` adds basename patterns (`*` and `?` only).
+
 ## Development
 
 Install both local hooks with `lefthook install`. `just check` is the fast pre-commit fmt/clippy check. After committing, run the full gate once on a clean HEAD:

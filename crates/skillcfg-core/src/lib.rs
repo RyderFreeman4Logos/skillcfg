@@ -1,3 +1,6 @@
+/// Canonical skill discovery and configurable roots.
+pub mod discovery;
+
 use std::{
     error::Error as StdError,
     fmt, fs, io,

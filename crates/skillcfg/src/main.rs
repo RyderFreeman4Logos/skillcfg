@@ -6,9 +6,10 @@ use std::{
     process,
 };
 
-use skillcfg_core::{Config, ConfigKey, render_value};
+use skillcfg_core::{Config, ConfigKey, discovery, render_value};
 
-const USAGE: &str = "Usage: skillcfg [--config PATH] get <literal.key>";
+const USAGE: &str =
+    "Usage: skillcfg [--config PATH] get <literal.key> | discover [--root PATH]... [--verbose]";
 
 #[derive(Debug)]
 enum CliError {
@@ -60,6 +61,9 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let command = command
                     .into_string()
                     .map_err(|_| CliError::Usage("command name must be valid UTF-8".to_owned()))?;
+                if command == "discover" {
+                    return discover(explicit_config, args);
+                }
                 if command != "get" {
                     return Err(CliError::Usage(format!("unknown command '{command}'")));
                 }
@@ -99,6 +103,69 @@ fn get(explicit_config: Option<PathBuf>, key: &str) -> Result<(), CliError> {
             .map_err(|error| CliError::Failure(format!("cannot write stdout: {error}")))?;
     }
     Ok(())
+}
+
+fn discover(
+    explicit_config: Option<PathBuf>,
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(), CliError> {
+    let mut roots = Vec::new();
+    let mut verbose = false;
+    while let Some(arg) = args.next() {
+        if arg == "--verbose" {
+            verbose = true;
+        } else if arg == "--root" {
+            let root = args
+                .next()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| CliError::Usage("--root requires a nonempty path".to_owned()))?;
+            roots.push(PathBuf::from(root));
+        } else {
+            return Err(CliError::Usage(
+                "discover accepts --root PATH and --verbose".to_owned(),
+            ));
+        }
+    }
+    let path = config_path(explicit_config.clone())?;
+    let config =
+        if explicit_config.is_some() || env::var_os("SKILLCFG_CONFIG").is_some() || path.exists() {
+            Some(Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?)
+        } else {
+            None
+        };
+    let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
+    let (configured, ignores, explicit) =
+        discovery::settings(config.as_ref(), &path, &home).map_err(CliError::Failure)?;
+    let explicit = explicit || !roots.is_empty();
+    if roots.is_empty() {
+        roots = configured;
+    }
+    let result = discovery::discover(&roots, &ignores, explicit);
+    for diagnostic in &result.diagnostics {
+        eprintln!("skillcfg: {}", diagnostic.message);
+    }
+    if result.diagnostics.iter().any(|d| d.error) {
+        return Err(CliError::Failure("discovery failed".to_owned()));
+    }
+    let mut output = String::new();
+    for skill in &result.skills {
+        if verbose {
+            output.push_str(&format!(
+                "{}\t{:?}\t{:?}\n",
+                skill.name, skill.canonical_dir, skill.exposures
+            ));
+        } else {
+            output.push_str(&format!("{}\n", skill.name));
+        }
+    }
+    write_output(&output)
+}
+
+fn write_output(rendered: &str) -> Result<(), CliError> {
+    io::stdout()
+        .lock()
+        .write_all(rendered.as_bytes())
+        .map_err(|error| CliError::Failure(format!("cannot write stdout: {error}")))
 }
 
 fn config_path(explicit: Option<PathBuf>) -> Result<PathBuf, CliError> {
