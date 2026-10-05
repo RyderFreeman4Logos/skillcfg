@@ -28,5 +28,8 @@ gate:
 verify-admission:
     PYTHONDONTWRITEBYTECODE=1 python3 scripts/admission.py verify
 
+build:
+    ionice -c3 cargo build --workspace
+
 get key:
     ionice -c3 cargo run -q -p skillcfg -- --config examples/config.toml get {{key}}
