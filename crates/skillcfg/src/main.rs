@@ -194,11 +194,20 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let help = command_help(&command)
                     .ok_or_else(|| CliError::Usage(format!("unknown command '{command}'")))?;
                 let command_args = args.collect::<Vec<_>>();
-                if command_args
-                    .iter()
-                    .any(|arg| arg == OsStr::new("-h") || arg == OsStr::new("--help"))
-                {
-                    return Err(CliError::Help(help));
+                let mut help_args = command_args.iter();
+                while let Some(arg) = help_args.next() {
+                    if (arg == "--root"
+                        && matches!(
+                            command.as_str(),
+                            "discover" | "validate" | "show-skill" | "explain"
+                        ))
+                        || (arg == "--format"
+                            && matches!(command.as_str(), "get-many" | "show-skill"))
+                    {
+                        help_args.next();
+                    } else if arg == "-h" || arg == "--help" {
+                        return Err(CliError::Help(help));
+                    }
                 }
                 let mut args = command_args.into_iter();
                 if command == "explain" {
