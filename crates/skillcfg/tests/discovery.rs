@@ -43,6 +43,102 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+#[test]
+fn batch_output_is_ordered_atomic_and_json_parseable() {
+    let f = Fixture::new();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\n[values]\na = \"hello\"\nz = 7\nmultiline = \"line\\nnext\"\narray = [1, true]\n").unwrap();
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "get-many",
+        "values.z",
+        "values.a",
+        "values.multiline",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "values.z=7\nvalues.a=hello\nvalues.multiline=\"line\\nnext\"\n"
+    );
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "get-many",
+        "values.a",
+        "values.array",
+        "--format",
+        "json",
+    ]);
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "{\"values.a\":\"hello\",\"values.array\":[1,true]}\n"
+    );
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "get-many",
+        "values.a",
+        "values.absent",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("hello"));
+}
+
+#[test]
+fn show_skill_defaults_to_visible_with_optional_linked_manifest() {
+    let f = Fixture::new();
+    let skill = f.skill("root/review", "review");
+    f.skill("root/no-manifest", "no-manifest");
+    let manifest = f.0.join("manifest.toml");
+    fs::write(&manifest, "schema_version = 1\n[visible]\nstyle = \"review.style\"\n[opaque]\nmodel = \"review.model\"\n").unwrap();
+    symlink(&manifest, skill.join("skillcfg.toml")).unwrap();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version = 1\n[discovery]\nroots = [\"root\"]\n[review]\nstyle = \"careful\"\nmodel = \"SYNTHETIC_PRIVATE_CANARY\"\n").unwrap();
+    let out = f.run(&["--config", text(&config), "show-skill", "review"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "style=careful\n");
+    assert!(out.stderr.is_empty());
+    let out = f.run(&[
+        "--config",
+        text(&config),
+        "show-skill",
+        "review",
+        "--all",
+        "--format",
+        "json",
+    ]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("SYNTHETIC_PRIVATE_CANARY")
+    );
+    let out = f.run(&["--config", text(&config), "show-skill", "no-manifest"]);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    for source in [
+        "schema_version = 1\n[visible]\nx = [",
+        "schema_version = 1\n[visible]\nx = \"review.style\"\n[opaque]\nx = \"review.model\"\n",
+    ] {
+        fs::write(&manifest, source).unwrap();
+        let out = f.run(&["--config", text(&config), "show-skill", "review"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("SYNTHETIC_PRIVATE_CANARY"));
+    }
+}
+
 fn text(path: &Path) -> &str {
     path.to_str().unwrap()
 }

@@ -24,6 +24,22 @@ Optional `[discovery] roots = ["~/skills", "relative/root"]` selects roots in th
 
 Directories containing the exact filename `SKILL.md` are candidates, including roots and nested skills. Plain or single/double-quoted frontmatter `name:` takes precedence over the canonical directory basename; names contain ASCII letters/digits/`_`/`-`/`.`. This is not a complete YAML parser. Symlinked roots, categories, skills and Markdown files are followed, including targets outside roots. Broken links/cycles warn and traversal continues; name/read errors fail. Active canonical ancestors stop cycles, with a 256-directory depth ceiling. `.git`, `target`, `node_modules`, `.cache`, and `__pycache__` are skipped. `[discovery] ignore = ["cache*", "scratch?"]` adds basename patterns (`*` and `?` only).
 
+## Manifest and batch reads
+
+A skill's optional `skillcfg.toml` declares dependencies, not copied values:
+
+```toml
+schema_version = 1
+[visible]
+style = "review.style"
+[opaque]
+model = "model_tiers.review.model_id"
+```
+
+`skillcfg show-skill review` resolves only visible bindings, sorted by alias. `--all` explicitly includes opaque values; `--format json` emits a compact JSON object. Missing optional manifests yield no bindings. Malformed manifests, non-string/invalid keys, duplicate aliases (including across both classes), and missing selected global keys fail before any stdout is written. Manifest symlinks are supported; broken ones are not treated as absent.
+
+`skillcfg get-many key.one key.two [--format kv|json]` resolves all requested keys before writing and preserves input order; duplicates fail. Default KV has one `key=value` line per binding. Plain, unambiguous strings are unquoted; empty strings, leading/trailing whitespace, control characters, JSON-looking strings, boolean/null spellings and numeric strings are JSON-quoted. Numbers/bools use natural text; arrays/tables use compact JSON. JSON preserves TOML value types (datetimes become strings); non-finite floats are rejected in either batch mode. Treat KV as data, never `eval` it. Explicit `get` and `get-many` intentionally disclose requested values for scripts; `show-skill` never includes opaque values by default. This is preference storage, not a secret manager.
+
 ## Development
 
 Install both local hooks with `lefthook install`. `just check` is the fast pre-commit fmt/clippy check. After committing, run the full gate once on a clean HEAD:

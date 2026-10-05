@@ -1,5 +1,7 @@
 /// Canonical skill discovery and configurable roots.
 pub mod discovery;
+/// Skill-local dependencies and reversible batch output.
+pub mod manifest;
 
 use std::{
     error::Error as StdError,

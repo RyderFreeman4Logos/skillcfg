@@ -6,10 +6,13 @@ use std::{
     process,
 };
 
-use skillcfg_core::{Config, ConfigKey, discovery, render_value};
+use skillcfg_core::{
+    Config, ConfigKey, discovery,
+    manifest::{Manifest, render_pairs},
+    render_value,
+};
 
-const USAGE: &str =
-    "Usage: skillcfg [--config PATH] get <literal.key> | discover [--root PATH]... [--verbose]";
+const USAGE: &str = "Usage: skillcfg [--config PATH] <command> [options]\nCommands: get KEY | get-many KEY... [--format kv|json] | show-skill NAME [--all] [--format kv|json] | discover [--root PATH]... [--verbose]";
 
 #[derive(Debug)]
 enum CliError {
@@ -61,6 +64,9 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let command = command
                     .into_string()
                     .map_err(|_| CliError::Usage("command name must be valid UTF-8".to_owned()))?;
+                if command == "get-many" || command == "show-skill" {
+                    return batch(explicit_config, &command, args);
+                }
                 if command == "discover" {
                     return discover(explicit_config, args);
                 }
@@ -141,12 +147,7 @@ fn discover(
         roots = configured;
     }
     let result = discovery::discover(&roots, &ignores, explicit);
-    for diagnostic in &result.diagnostics {
-        eprintln!("skillcfg: {}", diagnostic.message);
-    }
-    if result.diagnostics.iter().any(|d| d.error) {
-        return Err(CliError::Failure("discovery failed".to_owned()));
-    }
+    report(&result, false)?;
     let mut output = String::new();
     for skill in &result.skills {
         if verbose {
@@ -159,6 +160,131 @@ fn discover(
         }
     }
     write_output(&output)
+}
+
+fn batch(
+    explicit_config: Option<PathBuf>,
+    command: &str,
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(), CliError> {
+    let mut json = false;
+    let mut all = false;
+    let mut positional = Vec::new();
+    let mut roots = Vec::new();
+    let mut format_seen = false;
+    while let Some(arg) = args.next() {
+        if arg == "--format" {
+            if format_seen {
+                return Err(CliError::Usage("--format may be specified once".to_owned()));
+            }
+            format_seen = true;
+            let format = args
+                .next()
+                .ok_or_else(|| CliError::Usage("--format requires kv or json".to_owned()))?;
+            if format == "json" {
+                json = true;
+            } else if format != "kv" {
+                return Err(CliError::Usage("--format requires kv or json".to_owned()));
+            }
+        } else if arg == "--all" && command == "show-skill" {
+            all = true;
+        } else if arg == "--root" && command == "show-skill" {
+            roots.push(PathBuf::from(
+                args.next()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| CliError::Usage("--root requires a nonempty path".to_owned()))?,
+            ));
+        } else {
+            let arg = arg
+                .into_string()
+                .map_err(|_| CliError::Usage("argument must be valid UTF-8".to_owned()))?;
+            if arg.starts_with('-') {
+                return Err(CliError::Usage(format!("unsupported option {arg:?}")));
+            }
+            positional.push(arg);
+        }
+    }
+    if positional.is_empty() || (command == "show-skill" && positional.len() != 1) {
+        return Err(CliError::Usage(format!(
+            "{command} has invalid argument count"
+        )));
+    }
+    // Validate all caller keys before reading a configuration file.
+    let keys = if command == "get-many" {
+        positional
+            .iter()
+            .map(|s| {
+                s.parse::<ConfigKey>()
+                    .map_err(|e| CliError::Usage(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    let path = config_path(explicit_config)?;
+    let config = Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?;
+    if command == "get-many" {
+        let pairs = keys
+            .iter()
+            .map(|k| {
+                config
+                    .get(k)
+                    .map(|v| (k.as_str(), v))
+                    .map_err(|e| CliError::Failure(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return write_output(&render_pairs(&pairs, json).map_err(CliError::Failure)?);
+    }
+    let result = find_skills(&config, &path, roots)?;
+    report(&result, false)?;
+    let name = &positional[0];
+    let skill = result
+        .skills
+        .iter()
+        .find(|s| &s.name == name)
+        .ok_or_else(|| CliError::Failure(format!("skill {name:?} not found")))?;
+    let manifest =
+        Manifest::load(&skill.canonical_dir.join("skillcfg.toml")).map_err(CliError::Failure)?;
+    let mut bindings = manifest.visible.iter().collect::<Vec<_>>();
+    if all {
+        bindings.extend(manifest.opaque.iter());
+    }
+    bindings.sort_by_key(|(alias, _)| *alias);
+    let pairs = bindings
+        .into_iter()
+        .map(|(alias, b)| {
+            config
+                .get(&b.key)
+                .map(|v| (alias.as_str(), v))
+                .map_err(|e| CliError::Failure(e.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    write_output(&render_pairs(&pairs, json).map_err(CliError::Failure)?)
+}
+
+fn find_skills(
+    config: &Config,
+    path: &std::path::Path,
+    mut roots: Vec<PathBuf>,
+) -> Result<discovery::Discovery, CliError> {
+    let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
+    let (configured, ignores, explicit) =
+        discovery::settings(Some(config), path, &home).map_err(CliError::Failure)?;
+    let explicit = explicit || !roots.is_empty();
+    if roots.is_empty() {
+        roots = configured;
+    }
+    Ok(discovery::discover(&roots, &ignores, explicit))
+}
+fn report(result: &discovery::Discovery, strict: bool) -> Result<(), CliError> {
+    for diagnostic in &result.diagnostics {
+        eprintln!("skillcfg: {}", diagnostic.message);
+    }
+    if result.diagnostics.iter().any(|d| d.error || strict) {
+        Err(CliError::Failure("discovery failed".to_owned()))
+    } else {
+        Ok(())
+    }
 }
 
 fn write_output(rendered: &str) -> Result<(), CliError> {
