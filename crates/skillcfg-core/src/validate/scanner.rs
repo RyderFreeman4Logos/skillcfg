@@ -8,7 +8,7 @@ pub(super) fn scan(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
         line: 1,
         references: Vec::new(),
     };
-    lexer.commands(None, 0, &mut Vec::new());
+    lexer.commands(None, 0, &mut Vec::new(), false);
     lexer.references.sort_by_key(|(line, _)| *line);
     lexer.references
 }
@@ -16,7 +16,36 @@ pub(super) fn scan(source: &str) -> Vec<(usize, Option<ConfigKey>)> {
 struct Word {
     text: String,
     dynamic: bool,
+    escaped: bool,
+    plain: bool,
+    assignment: bool,
     line: usize,
+}
+impl Word {
+    fn name_length(source: &[u8]) -> usize {
+        source
+            .iter()
+            .enumerate()
+            .take_while(|(i, b)| {
+                **b == b'_' || b.is_ascii_alphabetic() || (*i > 0 && b.is_ascii_digit())
+            })
+            .count()
+    }
+    // Assignment is a source role, not a property of the quote-decoded value.
+    fn assignment(source: &[u8]) -> bool {
+        let name = Self::name_length(source);
+        if name == 0 {
+            return false;
+        }
+        let mut rest = &source[name..];
+        if rest.starts_with(b"[") {
+            let Some(end) = rest.iter().position(|b| *b == b']') else {
+                return false;
+            };
+            rest = &rest[end + 1..];
+        }
+        rest.starts_with(b"=") || rest.starts_with(b"+=")
+    }
 }
 struct Lexer<'a> {
     source: &'a [u8],
@@ -57,6 +86,7 @@ impl Lexer<'_> {
         end: Option<u8>,
         depth: usize,
         heredocs: &mut Vec<(String, bool)>,
+        data: bool,
     ) -> bool {
         if depth >= 16 {
             self.unknown(self.line);
@@ -71,7 +101,7 @@ impl Lexer<'_> {
                 break;
             };
             if Some(byte) == end {
-                self.invocation(&words, redirected);
+                self.invocation(&words, redirected, data);
                 self.advance();
                 return true;
             }
@@ -83,7 +113,7 @@ impl Lexer<'_> {
                     }
                 }
                 b'\n' | b';' | b'|' | b'&' => {
-                    self.invocation(&words, redirected);
+                    self.invocation(&words, redirected, data);
                     words.clear();
                     redirected = false;
                     self.advance();
@@ -92,18 +122,45 @@ impl Lexer<'_> {
                     }
                 }
                 b'(' => {
-                    self.invocation(&words, redirected);
-                    words.clear();
-                    redirected = false;
+                    if !data && self.starts(b"((") {
+                        self.at += 2;
+                        self.arithmetic(depth);
+                        continue;
+                    }
+                    let compound = data
+                        || (self.source.get(self.at.wrapping_sub(1)) == Some(&b'=')
+                            && words.last().is_some_and(|w: &Word| w.assignment));
+                    if !compound {
+                        self.invocation(&words, redirected, data);
+                        words.clear();
+                        redirected = false;
+                    }
                     self.advance();
-                    self.commands(Some(b')'), depth + 1, heredocs);
+                    self.commands(Some(b')'), depth + 1, heredocs, compound);
                 }
                 b')' => {
-                    self.invocation(&words, redirected);
+                    self.invocation(&words, redirected, data);
                     words.clear();
                     self.advance();
                 }
                 b'<' | b'>' => {
+                    // Adjacent unquoted numeric/named descriptors are operator roles, not argv.
+                    if self.at > 0
+                        && !self.source[self.at - 1].is_ascii_whitespace()
+                        && words.last().is_some_and(|w| {
+                            w.plain
+                                && (w.text.bytes().all(|b| b.is_ascii_digit())
+                                    || w.text
+                                        .strip_prefix('{')
+                                        .and_then(|s| s.strip_suffix('}'))
+                                        .is_some_and(|name| {
+                                            !name.is_empty()
+                                                && Word::name_length(name.as_bytes()) == name.len()
+                                        }))
+                        })
+                    {
+                        words.pop();
+                    }
                     redirected |= words.is_empty();
                     let line = self.line;
                     let heredoc = self.starts(b"<<") && !self.starts(b"<<<");
@@ -145,7 +202,7 @@ impl Lexer<'_> {
                 }
             }
         }
-        self.invocation(&words, redirected);
+        self.invocation(&words, redirected, data);
         end.is_none()
     }
 
@@ -179,6 +236,8 @@ impl Lexer<'_> {
         let mut text = Vec::new();
         let mut quote = None;
         let mut dynamic = false;
+        let mut escaped = false;
+        let mut plain = true;
         while let Some(&byte) = self.source.get(self.at) {
             if quote.is_none()
                 && (byte.is_ascii_whitespace() || b";|&()< >".contains(&byte) || Some(byte) == end)
@@ -201,7 +260,8 @@ impl Lexer<'_> {
                         text.push(b'\\');
                     } else {
                         text.push(next);
-                        dynamic |= !delimiter;
+                        escaped |= !delimiter;
+                        plain = false;
                         self.advance();
                     }
                 } else {
@@ -211,6 +271,7 @@ impl Lexer<'_> {
                 quote = None;
                 self.advance();
             } else if quote.is_none() && matches!(byte, b'\'' | b'"') {
+                plain = false;
                 quote = Some(byte);
                 self.advance();
             } else if !delimiter && self.starts(b"$((") {
@@ -227,6 +288,7 @@ impl Lexer<'_> {
                     Some(if backtick { b'`' } else { b')' }),
                     depth + 1,
                     &mut Vec::new(),
+                    false,
                 );
                 if backtick || !closed {
                     for (_, key) in &mut self.references[first..] {
@@ -249,6 +311,9 @@ impl Lexer<'_> {
         (self.at != start).then(|| Word {
             text: String::from_utf8_lossy(&text).into_owned(),
             dynamic,
+            escaped,
+            plain: plain && !dynamic,
+            assignment: Word::assignment(&self.source[start..self.at]),
             line,
         })
     }
@@ -266,7 +331,7 @@ impl Lexer<'_> {
             if self.starts(b"$(") && !self.starts(b"$((") {
                 let first = self.references.len();
                 self.at += 2;
-                self.commands(Some(b')'), depth + 1, &mut Vec::new());
+                self.commands(Some(b')'), depth + 1, &mut Vec::new(), false);
                 for (_, key) in &mut self.references[first..] {
                     *key = None;
                 }
@@ -287,34 +352,27 @@ impl Lexer<'_> {
         self.unknown(line);
     }
 
-    fn invocation(&mut self, words: &[Word], redirected: bool) {
+    fn invocation(&mut self, words: &[Word], redirected: bool, data: bool) {
+        if data {
+            return;
+        }
         let mut at = 0;
         let mut prefixed = redirected;
+        let mut option_boundary = false;
         while let Some(word) = words.get(at) {
-            let assignment = word.text.split_once('=').is_some_and(|(name, _)| {
-                !name.is_empty()
-                    && name.bytes().enumerate().all(|(i, b)| {
-                        b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit())
-                    })
-            });
             let wrapper = !word.dynamic
                 && matches!(
                     word.text.as_str(),
-                    "command"
-                        | "env"
-                        | "exec"
-                        | "sudo"
-                        | "time"
-                        | "!"
-                        | "if"
-                        | "then"
-                        | "elif"
-                        | "else"
-                        | "while"
-                        | "until"
-                        | "do"
+                    "command" | "env" | "exec" | "sudo" | "time"
                 );
-            if assignment || wrapper || (prefixed && word.text.starts_with('-')) {
+            let punctuation = word.plain
+                && matches!(
+                    word.text.as_str(),
+                    "{" | "!" | "if" | "then" | "elif" | "else" | "while" | "until" | "do"
+                );
+            let option = prefixed && word.text.starts_with('-');
+            option_boundary |= option;
+            if word.assignment || wrapper || punctuation || option {
                 prefixed = true;
                 at += 1;
             } else {
@@ -325,13 +383,23 @@ impl Lexer<'_> {
             return;
         };
         if command.text != "skillcfg" || command.dynamic {
+            // ponytail: wrapper option operands are ambiguous without an option grammar.
+            // Keep identified downstream invocations unknown, never evaluate their keys.
+            if option_boundary {
+                for candidate in &words[at..] {
+                    if candidate.text == "skillcfg" && !candidate.dynamic {
+                        self.unknown(candidate.line);
+                    }
+                }
+            }
             return;
         }
         let rest = &words[at + 1..];
         let key = if !prefixed
+            && !command.escaped
             && rest.len() == 2
             && rest[0].text == "get"
-            && !rest.iter().any(|w| w.dynamic)
+            && !rest.iter().any(|w| w.dynamic || w.escaped)
         {
             rest[1].text.parse().ok()
         } else {

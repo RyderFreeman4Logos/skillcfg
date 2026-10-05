@@ -17,6 +17,212 @@ fn scanner_lexical_class_matrix_through_validate_and_explain() {
     type ScannerCase<'a> = (&'a str, &'a str, &'a [ExpectedReference<'a>]);
     let cases: &[ScannerCase<'_>] = &[
         (
+            "named descriptor prefix",
+            "{fd}>/dev/null skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "quoted descriptor data",
+            "\"2\">/dev/null skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "separated descriptor data",
+            "2 >/dev/null skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "quoted reserved word data",
+            "\"if\" skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "arithmetic command data",
+            "((skillcfg get values.missing))\n",
+            &[],
+        ),
+        (
+            "arithmetic active substitution",
+            "(( $(skillcfg get values.ok) ))\n",
+            &[(1, None)],
+        ),
+        (
+            "indexed array elements data",
+            "args=([0]=skillcfg [1]=get [2]=values.missing)\n",
+            &[],
+        ),
+        (
+            "compound suffix line",
+            "args=(skillcfg get values.missing)\nskillcfg get values.ok\n",
+            &[(2, Some("values.ok"))],
+        ),
+        ("array literal data", "args=(skillcfg get values.ok)\n", &[]),
+        (
+            "array missing data",
+            "args=(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "array multiline quoted data",
+            "args=(\n\"skillcfg\" \"get\" \"values.missing\"\n)\n",
+            &[],
+        ),
+        (
+            "compound append data",
+            "args+=(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "indexed compound data",
+            "args[0]=(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "declaration array data",
+            "declare -a args=(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "compound data after assignment",
+            "other=x args=(skillcfg get values.missing)\n",
+            &[],
+        ),
+        (
+            "array active substitution",
+            "args=(\"$(skillcfg get values.ok)\")\n",
+            &[(1, Some("values.ok"))],
+        ),
+        (
+            "subshell positive",
+            "(skillcfg get values.ok)\n",
+            &[(1, Some("values.ok"))],
+        ),
+        (
+            "multiline subshell",
+            "(\nskillcfg get values.ok\n)\n",
+            &[(2, Some("values.ok"))],
+        ),
+        (
+            "indexed assignment prefix",
+            "args[0]=x skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "quoted assignment data",
+            "\"args=x\" skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "env option operand",
+            "env -u UNUSED skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "command option operand",
+            "command -x UNUSED skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "exec option operand",
+            "exec -a NAME skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "sudo option operand",
+            "sudo -u USER skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "time option operand",
+            "time -o OUTPUT skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "leading fd",
+            "2>/dev/null skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "leading duplicate fd",
+            "2>&1 skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "leading fd newline",
+            "2>/dev/null \\\n skillcfg get \"$DYNAMIC\"\n",
+            &[(2, None)],
+        ),
+        (
+            "escaped command",
+            "\\skillcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "escaped command literal",
+            "\\skillcfg get values.missing\n",
+            &[(1, None)],
+        ),
+        (
+            "mixed escaped command",
+            "sk\\illcfg get \"$DYNAMIC\"\n",
+            &[(1, None)],
+        ),
+        (
+            "quoted command literal",
+            "\"skillcfg\" get values.ok\n",
+            &[(1, Some("values.ok"))],
+        ),
+        (
+            "brace group",
+            "{ skillcfg get \"$DYNAMIC\"; }\n",
+            &[(1, None)],
+        ),
+        (
+            "brace multiline",
+            "{\n skillcfg get \"$DYNAMIC\";\n}\n",
+            &[(2, None)],
+        ),
+        (
+            "quoted brace data",
+            "\"{\" skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "escaped brace data",
+            "\\{ skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "wrapper ordinary quoted data",
+            "env printf \"%s\" \"skillcfg get values.missing\"\n",
+            &[],
+        ),
+        (
+            "fd quoted data",
+            "2>/dev/null printf \"%s\" \"skillcfg get values.missing\"\n",
+            &[],
+        ),
+        (
+            "brace quoted data",
+            "{ printf \"%s\" \"skillcfg get values.missing\"; }\n",
+            &[],
+        ),
+        (
+            "escaped data",
+            "printf \"%s\" \\skillcfg get values.missing\n",
+            &[],
+        ),
+        (
+            "comment roles",
+            "# env -u UNUSED \\skillcfg get \"$DYNAMIC\"\n",
+            &[],
+        ),
+        (
+            "unknown privacy line",
+            "\n env -u UNUSED skillcfg get \"$SYNTHETIC_PRIVATE_EXPRESSION\"\n",
+            &[(2, None)],
+        ),
+        (
             "single multiline data",
             "printf '%s\\n' '\nskillcfg get values.missing\n'\n",
             &[],
@@ -232,12 +438,16 @@ fn scanner_lexical_class_matrix_through_validate_and_explain() {
             failures.push(format!("{name}: refs {actual:?} != {expected:?}"));
         }
         fs::write(skill.join("scripts/run"), source).unwrap();
-        for command in ["validate", "explain"] {
+        for command in ["validate", "validate-skill", "explain"] {
             let mut args = vec!["--config", config.to_str().unwrap(), command];
             if command == "explain" {
                 args.push("values.ok");
             }
-            args.extend(["--root", skill.to_str().unwrap()]);
+            if command == "validate-skill" {
+                args.push(skill.to_str().unwrap());
+            } else {
+                args.extend(["--root", skill.to_str().unwrap()]);
+            }
             let out = Command::new(env!("CARGO_BIN_EXE_skillcfg"))
                 .args(&args)
                 .env_remove("SKILLCFG_CONFIG")
@@ -262,12 +472,13 @@ fn scanner_lexical_class_matrix_through_validate_and_explain() {
                             .iter()
                             .any(|line| !stdout.contains(&format!("scripts/run:{line}\tscript")))
                         || stdout.contains("unknown\t") != unknown))
-                || (command == "validate" && stderr.contains("unverifiable") != unknown)
+                || (command != "explain" && stderr.contains("unverifiable") != unknown)
                 || (stdout.clone() + &stderr).contains("SYNTHETIC_PRIVATE_CANARY")
+                || (stdout.clone() + &stderr).contains("SYNTHETIC_PRIVATE_EXPRESSION")
             {
                 failures.push(format!("{name}: {command}: {stdout} / {stderr}"));
             }
-            if command == "validate" {
+            if command != "explain" {
                 let out = Command::new(env!("CARGO_BIN_EXE_skillcfg"))
                     .args(&args)
                     .arg("--strict")
