@@ -116,6 +116,16 @@ impl Lexer<'_> {
         self.references.push((line, None));
     }
 
+    // Malformed syntax alone is not evidence of a skillcfg invocation.
+    fn unknown_region(&mut self, line: usize, start: usize) {
+        if self.source[start..self.at]
+            .split(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+            .any(|word| word == b"skillcfg")
+        {
+            self.unknown(line);
+        }
+    }
+
     // ponytail: bound nesting at 16; unsupported boundaries fail closed through EOF,
     // rather than reinterpreting uncertain data as a new shell command.
     fn commands(
@@ -341,7 +351,7 @@ impl Lexer<'_> {
                 let closed =
                     self.command_substitution(if backtick { b'`' } else { b')' }, depth, backtick);
                 if !closed {
-                    self.unknown(substitution_line);
+                    self.unknown_region(substitution_line, start);
                 }
             } else {
                 dynamic |= !delimiter && matches!(byte, b'$' | b'*' | b'?' | b'[' | b'~');
@@ -353,7 +363,7 @@ impl Lexer<'_> {
             }
         }
         if quote.is_some() {
-            self.unknown(line);
+            self.unknown_region(line, start);
             dynamic = true;
         }
         (self.at != start).then(|| Word {
@@ -372,6 +382,7 @@ impl Lexer<'_> {
     // the lexer, but are conservatively unknown in this unsupported expression.
     fn arithmetic(&mut self, depth: usize) {
         let line = self.line;
+        let start = self.at;
         let mut nesting = 0usize;
         while let Some(&byte) = self.source.get(self.at) {
             if nesting == 0 && self.starts(b"))") {
@@ -398,7 +409,7 @@ impl Lexer<'_> {
                 self.advance();
             }
         }
-        self.unknown(line);
+        self.unknown_region(line, start);
     }
 
     fn invocation(&mut self, words: &[Word], redirected: bool, data: bool) {

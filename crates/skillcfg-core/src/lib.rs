@@ -124,6 +124,46 @@ impl Config {
         })
     }
 
+    /// List all table and value paths in sorted depth-first order, without values.
+    /// Arrays are leaves. Non-bare TOML key segments are quoted and escaped;
+    /// those paths describe the document but may be outside `ConfigKey`'s grammar.
+    pub fn keys(&self) -> Vec<String> {
+        fn visit(value: &toml::Value, prefix: &str, paths: &mut Vec<String>) {
+            if let Some(table) = value.as_table() {
+                for (name, value) in table {
+                    let segment = if !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    {
+                        name.clone()
+                    } else {
+                        manifest::quote(name)
+                            .chars()
+                            .map(|ch| {
+                                if ch.is_control() {
+                                    format!("\\u{:04x}", u32::from(ch))
+                                } else {
+                                    ch.to_string()
+                                }
+                            })
+                            .collect()
+                    };
+                    let path = if prefix.is_empty() {
+                        segment
+                    } else {
+                        format!("{prefix}.{segment}")
+                    };
+                    paths.push(path.clone());
+                    visit(value, &path, paths);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        visit(&self.document, "", &mut paths);
+        paths
+    }
+
     /// Borrow the exact value; missing segments and non-table parents are distinct errors.
     pub fn get(&self, key: &ConfigKey) -> Result<&toml::Value, LookupError> {
         let mut value = &self.document;
@@ -283,6 +323,41 @@ mod tests {
 
     fn key(value: &str) -> ConfigKey {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn keys_include_schema_and_quote_nonliteral_segments() {
+        let config = Config::parse(
+            r#"schema_version = 1
+["☃"]
+"" = "private"
+"quote\"slash\\" = "private"
+"delete\u007f" = "private"
+"next\u0085escape\u009b" = "private"
+"#,
+        )
+        .unwrap();
+        assert!(
+            config
+                .keys()
+                .iter()
+                .all(|path| !path.chars().any(char::is_control))
+        );
+        assert_eq!(
+            config.keys(),
+            vec![
+                "schema_version",
+                "\"☃\"",
+                "\"☃\".\"\"",
+                "\"☃\".\"delete\\u007f\"",
+                "\"☃\".\"next\\u0085escape\\u009b\"",
+                "\"☃\".\"quote\\\"slash\\\\\"",
+            ]
+        );
+        assert_eq!(
+            Config::parse("schema_version=1").unwrap().keys(),
+            vec!["schema_version"]
+        );
     }
 
     #[test]

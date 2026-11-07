@@ -15,7 +15,58 @@ fn scanner_lexical_class_matrix_through_validate_and_explain() {
     .unwrap();
     type ExpectedReference<'a> = (usize, Option<&'a str>);
     type ScannerCase<'a> = (&'a str, &'a str, &'a [ExpectedReference<'a>]);
+    let deeply_escaped = format!(
+        "{}sk\\illcfg get values.ok{}\n",
+        "( ".repeat(16),
+        ") ".repeat(16)
+    );
+    let deeply_quoted = format!(
+        "{}\"ski\"\"llcfg\" get values.ok{}\n",
+        "( ".repeat(16),
+        ") ".repeat(16)
+    );
+    let deeply_continued = format!(
+        "{}ski\\\nllcfg get values.ok{}\n",
+        "( ".repeat(16),
+        ") ".repeat(16)
+    );
     let cases: &[ScannerCase<'_>] = &[
+        (
+            "depth refusal escaped command",
+            &deeply_escaped,
+            &[(1, None)],
+        ),
+        ("depth refusal quoted command", &deeply_quoted, &[(1, None)]),
+        (
+            "depth refusal continued command",
+            &deeply_continued,
+            &[(1, None)],
+        ),
+        (
+            "Python generator without invocation",
+            "x = next((1 for i in y), None)\n",
+            &[],
+        ),
+        (
+            "Python backtick without invocation",
+            "x = s.strip(\"`\")\n",
+            &[],
+        ),
+        (
+            "Python after real invocation",
+            "skillcfg get values.ok\nx = next((1 for i in y), None)\n",
+            &[(1, Some("values.ok"))],
+        ),
+        (
+            "Python backtick after invocation",
+            "skillcfg get values.ok\nx = s.strip(\"`\")\n",
+            &[(1, Some("values.ok"))],
+        ),
+        (
+            "unclosed arithmetic invocation",
+            "(( $(skillcfg get values.ok)\n",
+            &[(1, None), (1, None)],
+        ),
         (
             "named descriptor prefix",
             "{fd}>/dev/null skillcfg get \"$DYNAMIC\"\n",
