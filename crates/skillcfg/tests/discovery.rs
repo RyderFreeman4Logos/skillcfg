@@ -867,3 +867,36 @@ fn configured_relative_and_home_roots_follow_file_links() {
     assert!(String::from_utf8_lossy(&missing.stderr).contains("absent"));
     assert!(f.run(&["discover"]).status.success());
 }
+
+#[test]
+fn non_utf8_scripts_are_skipped_but_broken_links_still_fail() {
+    let f = Fixture::new();
+    let config = f.0.join("config.toml");
+    fs::write(&config, "schema_version=1\n").unwrap();
+    let skill = f.skill("root/demo", "demo");
+    let scripts = skill.join("scripts");
+    fs::create_dir_all(scripts.join("__pycache__")).unwrap();
+    fs::write(scripts.join("__pycache__/demo.pyc"), [0x89, 0xff, 0]).unwrap();
+    fs::write(scripts.join("helper.py"), "x = 1\n").unwrap();
+    for command in ["validate", "validate-skill"] {
+        let mut args = vec!["--config", text(&config), command];
+        if command == "validate" {
+            args.push("--root");
+        }
+        args.extend([text(&skill), "--strict"]);
+        let out = f.run(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"ok\n");
+        assert!(out.stderr.is_empty());
+        symlink("missing", scripts.join("broken")).unwrap();
+        let out = f.run(&args);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot scan"));
+        fs::remove_file(scripts.join("broken")).unwrap();
+    }
+}

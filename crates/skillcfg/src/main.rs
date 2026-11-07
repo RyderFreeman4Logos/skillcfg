@@ -18,6 +18,7 @@ const ROOT_HELP: &str = r#"skillcfg - agent-independent runtime preferences for 
 Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]
 
 Commands:
+  keys                    List configuration key paths without values.
   get KEY                 Print one configuration value.
   get-many KEY...         Print several values as key/value pairs or JSON.
   show-skill NAME         Resolve the bindings declared by a skill.
@@ -37,6 +38,17 @@ If XDG_CONFIG_HOME is unset, HOME is required to derive the final path.
 Selected files must be UTF-8 TOML with integer schema_version = 1.
 
 Usage errors exit 2; configuration, lookup, discovery, and validation failures exit 1.
+"#;
+const KEYS_HELP: &str = r#"Usage: skillcfg [--config PATH] keys
+
+List table and value paths without values, one per line in sorted depth-first
+order. Arrays are leaves. Special key segments use TOML quoting and escaping;
+quoted paths may be outside the get command's literal key grammar.
+A configuration file is required.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+  --config PATH           Select a TOML file before COMMAND (see root help).
 "#;
 const GET_HELP: &str = r#"Usage: skillcfg [--config PATH] get KEY
 
@@ -130,6 +142,7 @@ Options:
 
 fn command_help(command: &str) -> Option<&'static str> {
     match command {
+        "keys" => Some(KEYS_HELP),
         "get" => Some(GET_HELP),
         "get-many" => Some(GET_MANY_HELP),
         "show-skill" => Some(SHOW_SKILL_HELP),
@@ -210,6 +223,15 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                     }
                 }
                 let mut args = command_args.into_iter();
+                if command == "keys" {
+                    if args.next().is_some() {
+                        return Err(CliError::Usage("keys accepts no arguments".to_owned()));
+                    }
+                    let path = config_path(explicit_config)?;
+                    let config = Config::load(&path)
+                        .map_err(|error| CliError::Failure(error.to_string()))?;
+                    return write_output(&format!("{}\n", config.keys().join("\n")));
+                }
                 if command == "explain" {
                     return explain(explicit_config, args);
                 }

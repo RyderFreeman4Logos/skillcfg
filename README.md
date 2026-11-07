@@ -10,6 +10,7 @@ export PATH="$PWD/target/debug:$PATH"
 export SKILLCFG_CONFIG="$PWD/examples/config.toml"
 skillcfg get demo.message
 skillcfg get-many demo.attempts demo.enabled --format json
+skillcfg keys
 skillcfg discover --verbose
 skillcfg show-skill report
 skillcfg explain demo.timeout
@@ -18,13 +19,20 @@ skillcfg validate-skill examples/skills/report --strict
 examples/skills/report/scripts/report 'sample report'
 ```
 
-This builds the CLI and runs all seven commands against [`examples/config.toml`](examples/config.toml) and one portable skill-owned script. `get` prints `hello from skillcfg`; the script prints `sample report` under a centrally supplied deadline without exposing that deadline first. Change the one central value to affect every referencing skill. Choose another config explicitly with `skillcfg --config PATH get demo.message`.
+This builds the CLI and runs the commands against [`examples/config.toml`](examples/config.toml) and one portable skill-owned script. `get` prints `hello from skillcfg`; the script prints `sample report` under a centrally supplied deadline without exposing that deadline first. Change the one central value to affect every referencing skill. Choose another config explicitly with `skillcfg --config PATH get demo.message`.
 
 Configuration paths are selected in this order: `--config`, `SKILLCFG_CONFIG`, `$XDG_CONFIG_HOME/skillcfg/config.toml`, then `$HOME/.config/skillcfg/config.toml`. Unset environment variables fall through; a selected but empty `SKILLCFG_CONFIG` or `XDG_CONFIG_HOME` is an error, not a fallback. The file may be a symlink to a regular UTF-8 file; directories/devices/FIFOs are rejected. It must contain integer `schema_version = 1`.
 
 Keys such as `demo.message` are literal dotted paths: each nonempty segment contains only ASCII letters, digits, `_`, or `-`. Quoted segments, Unicode segments, and escaping dots are not supported; dots always traverse tables.
 
 `get` writes strings verbatim, including their existing newlines; other values use TOML text (arrays/tables use inline TOML). The CLI adds one newline only when the rendered value does not already end with one. The core renderer adds none. Errors go to stderr and return a non-zero status; syntax/schema diagnostics retain path, location or type, not unrelated source values.
+
+`skillcfg keys` lists the configuration index without printing values: one table
+or value path per line in sorted depth-first order, including empty tables.
+Arrays are leaves; their elements are never traversed. Special key segments use
+TOML quoting and escaping to keep dots and control characters unambiguous.
+Quoted paths describe the document but may be outside `get`'s literal key grammar.
+Key names remain visible, so keep secrets in values rather than key names.
 
 ## Discovery
 
@@ -54,7 +62,7 @@ model = "model_tiers.review.model_id"
 
 `skillcfg validate [--root PATH]... [--strict]` checks the config, discovered skills, manifests and scripts. `skillcfg validate-skill PATH [--strict]` checks just that skill without traversing configured roots. Successful validation prints `ok`; errors leave stdout empty, report path/line and key on stderr, and exit 1. Usage errors exit 2. Warnings do not fail unless `--strict` is requested.
 
-Checks include missing manifest keys, duplicate aliases, collisions, broken links, literal script key existence, undeclared script keys, statically unused opaque dependencies and non-executable shebang scripts. Visible dependencies need not appear in scripts. The read-only scanner recognizes simple command-position `skillcfg get literal.key`, quoted literal keys, and shell command substitutions, preserving lexical context and physical source lines across continuations and multiline quotes. Comments and ordinary quoted strings are skipped. Dynamic keys, unsupported invocation syntax and options are reported as unverifiable, never guessed or executed. Queued here-document bodies are skipped using literal quote-removed delimiters (including escapes, empty delimiters and `<<-` tabs); declarations and here-strings are marked unknown. Assignment/wrapper-prefixed invocations and backticks are conservative unknowns. Nesting is bounded at 16; uncertain unclosed boundaries suppress definite claims through EOF. This is not a Bash parser, execution tracer or workflow validator; complex/multiline shell scripts still require skill-owned tests. Error output never includes resolved values or source excerpts.
+Checks include missing manifest keys, duplicate aliases, collisions, broken links, literal script key existence, undeclared script keys, statically unused opaque dependencies and non-executable shebang scripts. Visible dependencies need not appear in scripts. Non-UTF-8 files such as Python bytecode are skipped; actual filesystem errors still fail validation. Ordinary malformed syntax without a `skillcfg` token in the unparsed region does not imply an invocation. The read-only scanner recognizes simple command-position `skillcfg get literal.key`, quoted literal keys, and shell command substitutions, preserving lexical context and physical source lines across continuations and multiline quotes. Comments and ordinary quoted strings are skipped. Dynamic keys, unsupported invocation syntax and options are reported as unverifiable, never guessed or executed. Queued here-document bodies are skipped using literal quote-removed delimiters (including escapes, empty delimiters and `<<-` tabs); declarations and here-strings are marked unknown. Assignment/wrapper-prefixed invocations and backticks are conservative unknowns. Nesting is bounded at 16; exceeding this bound always reports an unknown boundary because deeper invocations cannot be ruled out; uncertain unclosed boundaries suppress definite claims through EOF. This is not a Bash parser, execution tracer or workflow validator; complex/multiline shell scripts still require skill-owned tests. Error output never includes resolved values or source excerpts.
 
 ## Impact inspection
 

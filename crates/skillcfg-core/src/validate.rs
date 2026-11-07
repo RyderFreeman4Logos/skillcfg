@@ -32,6 +32,7 @@ pub struct Analysis {
     pub diagnostics: Vec<Diagnostic>,
 }
 /// Parse optional dependencies and recursively scan regular UTF-8 files under scripts/.
+/// Non-UTF-8 files are skipped; other read errors remain errors.
 /// Follow script links, deduplicate file identities, stop directory cycles, and keep errors
 /// independent so one malformed manifest does not suppress script findings.
 pub fn analyze(skill: &Skill, config: &Config) -> Analysis {
@@ -198,6 +199,7 @@ fn scan_files(path: &Path, visited: &mut BTreeSet<PathBuf>, result: &mut Analysi
                     });
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {}
             Err(e) => result.diagnostics.push(Diagnostic {
                 error: true,
                 message: format!("cannot read script {:?}: {e}", path),

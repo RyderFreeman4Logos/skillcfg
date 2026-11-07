@@ -278,6 +278,11 @@ fn every_help_option_succeeds_without_loading_config_or_home() {
     let missing_config = temp.0.join("must-not-be-read.toml");
     let cases = [
         (
+            "keys",
+            "Usage: skillcfg [--config PATH] keys",
+            "without values",
+        ),
+        (
             "",
             "Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]",
             "List discovered skills from configured or conventional roots.",
@@ -350,4 +355,52 @@ fn every_help_option_succeeds_without_loading_config_or_home() {
             );
         }
     }
+}
+
+#[test]
+fn keys_lists_structure_without_values_and_escapes_segments() {
+    let temp = TempDir::new();
+    let config = temp.0.join("config.toml");
+    fs::write(
+        &config,
+        r#"schema_version = 1
+"a.b" = { "line\nkey" = "SYNTHETIC_PRIVATE_CANARY" }
+array = [{ hidden = "SYNTHETIC_PRIVATE_CANARY" }]
+[empty]
+[providers.openai]
+api_key = "SYNTHETIC_PRIVATE_CANARY"
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        message(run(
+            &["--config", config.to_str().unwrap(), "keys"],
+            &temp.0,
+            None,
+            None
+        )),
+        "\"a.b\"\n\"a.b\".\"line\\nkey\"\narray\nempty\nproviders\nproviders.openai\nproviders.openai.api_key\nschema_version\n"
+    );
+    let out = run(
+        &["--config", config.to_str().unwrap(), "keys", "extra"],
+        &temp.0,
+        None,
+        None,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    fs::write(
+        &config,
+        "schema_version=1\nsecret=\"SYNTHETIC_PRIVATE_CANARY\" broken",
+    )
+    .unwrap();
+    let out = run(
+        &["--config", config.to_str().unwrap(), "keys"],
+        &temp.0,
+        None,
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("SYNTHETIC_PRIVATE_CANARY"));
 }
