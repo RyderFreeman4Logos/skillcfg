@@ -7,11 +7,16 @@ use std::{
     process::{Command, Stdio},
 };
 
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
+use rustix::{
+    fs::{FlockOperation, Mode, OFlags, fgetxattr_query, flock, lgetxattr_query, open},
+    io::Errno,
+};
 use skillcfg_core::{Config, ConfigError, display_path};
 use tempfile::{Builder, NamedTempFile};
 
 use crate::CliError;
+
+const ACCESS_ACL: &str = "system.posix_acl_access";
 
 pub(crate) enum Operation<'a> {
     Edit {
@@ -41,6 +46,7 @@ pub(crate) fn run(path: &Path, operation: Operation<'_>) -> Result<(), CliError>
     flock(&directory, FlockOperation::LockExclusive)
         .map_err(|e| failure("lock config directory", parent, e.into()))?;
     let (original, metadata) = read_regular(&target)?;
+    require_mode_only(lgetxattr_query(&target, ACCESS_ACL), path)?;
     if metadata.nlink() != 1 {
         return Err(CliError::Failure(
             "cannot atomically edit a config with hard links".to_owned(),
@@ -108,16 +114,19 @@ pub(crate) fn run(path: &Path, operation: Operation<'_>) -> Result<(), CliError>
         .as_file()
         .set_permissions(metadata.permissions())
         .map_err(|e| failure("preserve config permissions", path, e))?;
+    require_mode_only(fgetxattr_query(replacement.as_file(), ACCESS_ACL), path)?;
     replacement
         .as_file()
         .sync_all()
         .map_err(|e| failure("sync replacement config", path, e))?;
     let previous = staged(scratch.path(), &original)?;
+    require_mode_only(fgetxattr_query(previous.as_file(), ACCESS_ACL), &backup)?;
     previous
         .as_file()
         .sync_all()
         .map_err(|e| failure("sync previous config", &backup, e))?;
-    match fs::symlink_metadata(&backup) {
+    let retained_backup = scratch.path().join("original-prev");
+    let had_backup = match fs::symlink_metadata(&backup) {
         Ok(info) if !info.is_file() => {
             return Err(CliError::Failure(format!(
                 "previous config '{}' must be a regular file",
@@ -127,10 +136,16 @@ pub(crate) fn run(path: &Path, operation: Operation<'_>) -> Result<(), CliError>
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             return Err(failure("inspect previous config", &backup, error));
         }
-        _ => {}
-    }
+        Ok(_) => {
+            fs::hard_link(&backup, &retained_backup)
+                .map_err(|e| failure("retain previous config", &backup, e))?;
+            true
+        }
+        Err(_) => false,
+    };
 
     let (current, current_metadata) = read_regular(&target)?;
+    require_mode_only(lgetxattr_query(&target, ACCESS_ACL), path)?;
     if fs::canonicalize(path).ok().as_ref() != Some(&target)
         || current != original
         || unchanged_attributes(&metadata) != unchanged_attributes(&current_metadata)
@@ -143,16 +158,48 @@ pub(crate) fn run(path: &Path, operation: Operation<'_>) -> Result<(), CliError>
     previous
         .persist(&backup)
         .map_err(|e| failure("install previous config", &backup, e.error))?;
-    directory
-        .sync_all()
-        .map_err(|e| failure("sync config backup directory", parent, e))?;
-    replacement
-        .persist(&target)
-        .map_err(|e| failure("install validated config", path, e.error))?;
+    // shortcut: an abrupt interruption between the two renames can leave the
+    // prior backup in the private edit directory. Use a journal for auto-recovery.
+    if let Err(error) = directory.sync_all().and_then(|()| {
+        replacement
+            .persist(&target)
+            .map(|_| ())
+            .map_err(|e| e.error)
+    }) {
+        let rollback = if had_backup {
+            fs::rename(&retained_backup, &backup)
+        } else {
+            fs::remove_file(&backup)
+        };
+        if let Err(rollback_error) = rollback {
+            let recovery = scratch.keep();
+            return Err(CliError::Failure(format!(
+                "cannot install validated config: {error}; cannot roll back previous config: {rollback_error}; recovery directory '{}'",
+                display_path(&recovery)
+            )));
+        }
+        if let Err(sync_error) = directory.sync_all() {
+            eprintln!(
+                "skillcfg: restored the prior backup, but could not sync its directory: {sync_error}"
+            );
+        }
+        return Err(failure("install validated config", path, error));
+    }
     if let Err(error) = directory.sync_all() {
         eprintln!("skillcfg: updated config, but could not sync its directory: {error}");
     }
     Ok(())
+}
+
+fn require_mode_only(acl: rustix::io::Result<usize>, path: &Path) -> Result<(), CliError> {
+    match acl {
+        Err(Errno::NODATA | Errno::NOTSUP) => Ok(()),
+        Ok(_) => Err(CliError::Failure(format!(
+            "cannot preserve access ACL for config '{}'",
+            display_path(path)
+        ))),
+        Err(error) => Err(failure("inspect config access ACL", path, error.into())),
+    }
 }
 
 fn unchanged_attributes(metadata: &fs::Metadata) -> (u64, u64, u64, u32, u32, u32) {
