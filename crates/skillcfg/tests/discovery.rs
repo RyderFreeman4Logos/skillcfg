@@ -764,10 +764,17 @@ fn absent_home_and_control_character_paths_fail_safely() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert_eq!(
         stderr.lines().count(),
-        1,
+        2,
         "paths must not inject extra diagnostic lines"
     );
-    assert!(stderr.contains("private\\nforged-diagnostic.toml"));
+    let mut lines = stderr.lines();
+    assert!(
+        lines
+            .next()
+            .unwrap()
+            .contains("private\\nforged-diagnostic.toml")
+    );
+    assert!(lines.next().unwrap().starts_with("skillcfg: hint:"));
 }
 
 fn text(path: &Path) -> &str {

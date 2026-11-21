@@ -2,15 +2,17 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
 };
 
 use skillcfg_core::{
-    Config, ConfigKey, discovery, display_path,
+    Config, ConfigError, ConfigKey, discovery, display_path,
     manifest::{Manifest, render_pairs},
     render_value, validate,
 };
+
+mod config_edit;
 
 const USAGE: &str = "Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]";
 const ROOT_HELP: &str = r#"skillcfg - agent-independent runtime preferences for skills
@@ -23,6 +25,9 @@ Commands:
   get-many KEY...         Print several values as key/value pairs or JSON.
   show-skill NAME         Resolve the bindings declared by a skill.
   discover                List discovered skills from configured or conventional roots.
+  check FILE              Check a TOML file and its schema version.
+  edit -- CMD ... {}      Edit a private copy, then validate and install it.
+  restore-prev            Restore the previous valid configuration.
   validate                Validate the configuration and discovered skills.
   validate-skill PATH     Validate one skill directory.
   explain KEY             Show one value and its known skill references.
@@ -105,6 +110,32 @@ Options:
   -h, --help              Show this help without loading configuration.
   --config PATH           Select a TOML file before COMMAND (see root help).
 "#;
+const CHECK_HELP: &str = r#"Usage: skillcfg check FILE
+
+Read FILE as UTF-8 TOML and require integer schema_version = 1 without discovering skills.
+Success prints 'ok'. Errors report the file and any available location without config values.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+"#;
+const EDIT_HELP: &str = r#"Usage: skillcfg [--config PATH] edit -- CMD [ARGS] {}
+
+Replace one literal {} argument with the path to a private candidate. Run CMD
+without a shell or inherited standard streams. If the editor succeeds and the
+candidate passes check, atomically install it and save the old bytes as .prev.
+Success is silent.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+"#;
+const RESTORE_HELP: &str = r#"Usage: skillcfg [--config PATH] restore-prev
+
+Install the previous version from the .prev file after checking it. Save the
+current version as .prev so the restore can be reversed. Success is silent.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+"#;
 const VALIDATE_HELP: &str = r#"Usage: skillcfg [--config PATH] validate [--root PATH]... [--strict]
 
 Validate the selected configuration, discovered skills, manifests, and scripts.
@@ -147,6 +178,9 @@ fn command_help(command: &str) -> Option<&'static str> {
         "get-many" => Some(GET_MANY_HELP),
         "show-skill" => Some(SHOW_SKILL_HELP),
         "discover" => Some(DISCOVER_HELP),
+        "check" => Some(CHECK_HELP),
+        "edit" => Some(EDIT_HELP),
+        "restore-prev" => Some(RESTORE_HELP),
         "validate" => Some(VALIDATE_HELP),
         "validate-skill" => Some(VALIDATE_SKILL_HELP),
         "explain" => Some(EXPLAIN_HELP),
@@ -158,7 +192,14 @@ fn command_help(command: &str) -> Option<&'static str> {
 enum CliError {
     Help(&'static str),
     Usage(String),
+    Config(ConfigError),
     Failure(String),
+}
+
+impl From<ConfigError> for CliError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
+    }
 }
 
 fn main() {
@@ -168,6 +209,13 @@ fn main() {
         Err(CliError::Usage(message)) => {
             eprintln!("skillcfg: {message}\n{USAGE}");
             process::exit(2);
+        }
+        Err(CliError::Config(error)) => {
+            eprintln!("skillcfg: {error}");
+            eprintln!(
+                "skillcfg: hint: Fix the reported file or its permissions, then run skillcfg check FILE. Keep values out of logs."
+            );
+            process::exit(1);
         }
         Err(CliError::Failure(message)) => {
             eprintln!("skillcfg: {message}");
@@ -209,6 +257,9 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let command_args = args.collect::<Vec<_>>();
                 let mut help_args = command_args.iter();
                 while let Some(arg) = help_args.next() {
+                    if command == "edit" && arg == "--" {
+                        break;
+                    }
                     if (arg == "--root"
                         && matches!(
                             command.as_str(),
@@ -222,14 +273,55 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                         return Err(CliError::Help(help));
                     }
                 }
+                if command == "edit" {
+                    let [marker, program, editor_args @ ..] = command_args.as_slice() else {
+                        return Err(CliError::Usage("edit requires -- CMD [ARGS] {}".to_owned()));
+                    };
+                    if marker != "--"
+                        || program.is_empty()
+                        || editor_args.iter().filter(|arg| *arg == "{}").count() != 1
+                    {
+                        return Err(CliError::Usage(
+                            "edit requires -- CMD and exactly one {} argument".to_owned(),
+                        ));
+                    }
+                    return config_edit::run(
+                        &config_path(explicit_config)?,
+                        config_edit::Operation::Edit {
+                            program,
+                            editor_args,
+                        },
+                    );
+                }
                 let mut args = command_args.into_iter();
+                if command == "restore-prev" {
+                    if args.next().is_some() {
+                        return Err(CliError::Usage(
+                            "restore-prev accepts no arguments".to_owned(),
+                        ));
+                    }
+                    return config_edit::run(
+                        &config_path(explicit_config)?,
+                        config_edit::Operation::Restore,
+                    );
+                }
+                if command == "check" {
+                    let file = args
+                        .next()
+                        .filter(|path| !path.is_empty())
+                        .ok_or_else(|| CliError::Usage("check requires a file".to_owned()))?;
+                    if args.next().is_some() {
+                        return Err(CliError::Usage("check accepts exactly one file".to_owned()));
+                    }
+                    Config::load(Path::new(&file))?;
+                    return write_output("ok\n");
+                }
                 if command == "keys" {
                     if args.next().is_some() {
                         return Err(CliError::Usage("keys accepts no arguments".to_owned()));
                     }
                     let path = config_path(explicit_config)?;
-                    let config = Config::load(&path)
-                        .map_err(|error| CliError::Failure(error.to_string()))?;
+                    let config = Config::load(&path)?;
                     return write_output(&format!("{}\n", config.keys().join("\n")));
                 }
                 if command == "explain" {
@@ -264,7 +356,7 @@ fn get(explicit_config: Option<PathBuf>, key: &str) -> Result<(), CliError> {
         .parse::<ConfigKey>()
         .map_err(|error| CliError::Usage(error.to_string()))?;
     let path = config_path(explicit_config)?;
-    let config = Config::load(&path).map_err(|error| CliError::Failure(error.to_string()))?;
+    let config = Config::load(&path)?;
     let value = config
         .get(&key)
         .map_err(|error| CliError::Failure(error.to_string()))?;
@@ -306,7 +398,7 @@ fn discover(
     let path = config_path(explicit_config.clone())?;
     let config =
         if explicit_config.is_some() || env::var_os("SKILLCFG_CONFIG").is_some() || path.exists() {
-            Some(Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?)
+            Some(Config::load(&path)?)
         } else {
             None
         };
@@ -407,7 +499,7 @@ fn batch(
         Vec::new()
     };
     let path = config_path(explicit_config)?;
-    let config = Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?;
+    let config = Config::load(&path)?;
     if command == "get-many" {
         let pairs = keys
             .iter()
@@ -508,7 +600,7 @@ fn validate_command(
         ));
     }
     let path = config_path(explicit_config)?;
-    let config = Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?;
+    let config = Config::load(&path)?;
     let single = skill_path
         .as_ref()
         .map(std::fs::canonicalize)
@@ -566,7 +658,7 @@ fn explain(
     }
     let key = key.ok_or_else(|| CliError::Usage("explain requires a key".to_owned()))?;
     let path = config_path(explicit_config)?;
-    let config = Config::load(&path).map_err(|e| CliError::Failure(e.to_string()))?;
+    let config = Config::load(&path)?;
     let value = config
         .get(&key)
         .map_err(|e| CliError::Failure(e.to_string()))?;
