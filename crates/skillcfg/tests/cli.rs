@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,6 +199,118 @@ fn check_parses_only_the_requested_file() {
 }
 
 #[test]
+fn edit_uses_a_private_validated_copy_and_restore_keeps_an_undo() {
+    let temp = TempDir::new();
+    let config = temp.write_config("config.toml", "old");
+    let previous = temp.0.join("config.toml.prev");
+    let alias = temp.0.join("alias.toml");
+    symlink(&config, &alias).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o640)).unwrap();
+    let alias_arg = alias.to_str().unwrap();
+    let initial = fs::read(&config).unwrap();
+    let invoke = |script: &str| {
+        run(
+            &[
+                "--config", alias_arg, "edit", "--", "sh", "-c", script, "editor", "{}", "--help",
+            ],
+            &temp.0,
+            None,
+            None,
+        )
+    };
+    let edit = invoke(
+        r#"
+        test "$(stat -c %a "$1")" = 600 && test "$2" = --help || exit 1
+        test "$(stat -c %a "$(dirname "$1")")" = 700 || exit 1
+        printf '%s\n' 'schema_version = 1' '[demo]' 'message = "new"' > "$1.next"
+        mv "$1.next" "$1"
+        printf 'SYNTHETIC_PRIVATE_CANARY'
+        printf 'SYNTHETIC_PRIVATE_CANARY' >&2
+    "#,
+    );
+    assert_eq!(message(edit), "");
+    assert!(fs::symlink_metadata(&alias).unwrap().is_symlink());
+    assert_eq!(
+        fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(
+        fs::metadata(&previous).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let edited = fs::read(&config).unwrap();
+    assert!(edited.ends_with(b"message = \"new\"\n"));
+    assert_eq!(fs::read(&previous).unwrap(), initial);
+    assert_eq!(message(invoke("exit 0")), "");
+    assert_eq!(fs::read(&previous).unwrap(), initial);
+
+    for script in [
+        r#"printf '%s\n' 'schema_version = "SYNTHETIC_PRIVATE_CANARY"' > "$1""#,
+        r#"printf 'SYNTHETIC_PRIVATE_CANARY' >&2; exit 9"#,
+        r#"unlink "$1"; ln -s /dev/null "$1""#,
+    ] {
+        let failure = invoke(script);
+        assert_eq!(failure.status.code(), Some(1));
+        assert!(failure.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&failure.stderr).contains("SYNTHETIC_PRIVATE_CANARY"));
+        assert_eq!(fs::read(&config).unwrap(), edited);
+        assert_eq!(fs::read(&previous).unwrap(), initial);
+    }
+
+    let restore = run(
+        &["--config", alias_arg, "restore-prev"],
+        &temp.0,
+        None,
+        None,
+    );
+    assert_eq!(message(restore), "");
+    assert_eq!(fs::read(&config).unwrap(), initial);
+    assert_eq!(fs::read(&previous).unwrap(), edited);
+}
+
+#[test]
+fn concurrent_editors_serialize_and_read_each_committed_version() {
+    let temp = TempDir::new();
+    let path = temp.write_config("config.toml", "start");
+    std::thread::scope(|scope| {
+        let threads = (0..5)
+            .map(|i| {
+                let dir = &temp.0;
+                let path = path.as_path();
+                scope.spawn(move || {
+                    let key = format!("edited_{i}");
+                    let out = run(
+                        &[
+                            "--config",
+                            path.to_str().unwrap(),
+                            "edit",
+                            "--",
+                            "sh",
+                            "-c",
+                            r#"sleep 0.03; printf '%s = true\n' "$2" >> "$1""#,
+                            "editor",
+                            "{}",
+                            &key,
+                        ],
+                        dir,
+                        None,
+                        None,
+                    );
+                    assert_eq!(message(out), "");
+                })
+            })
+            .collect::<Vec<_>>();
+        for child in threads {
+            child.join().unwrap();
+        }
+    });
+    let final_text = fs::read_to_string(path).unwrap();
+    for i in 0..5 {
+        assert!(final_text.contains(&format!("edited_{i} = true\n")));
+    }
+}
+
+#[test]
 fn parser_diagnostics_do_not_disclose_source() {
     assert_private_error(
         "schema_version = 1\ntext = \"ok\"\nprivate_value = \"SYNTHETIC_PRIVATE_CANARY\" broken\n",
@@ -373,6 +486,16 @@ fn every_help_option_succeeds_without_loading_config_or_home() {
             "check",
             "Usage: skillcfg check FILE",
             "without discovering skills",
+        ),
+        (
+            "edit",
+            "Usage: skillcfg [--config PATH] edit -- CMD",
+            "private candidate",
+        ),
+        (
+            "restore-prev",
+            "Usage: skillcfg [--config PATH] restore-prev",
+            "previous version",
         ),
         (
             "validate-skill",

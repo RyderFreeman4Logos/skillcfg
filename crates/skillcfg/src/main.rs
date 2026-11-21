@@ -12,6 +12,8 @@ use skillcfg_core::{
     render_value, validate,
 };
 
+mod config_edit;
+
 const USAGE: &str = "Usage: skillcfg [--config PATH] <COMMAND> [OPTIONS]";
 const ROOT_HELP: &str = r#"skillcfg - agent-independent runtime preferences for skills
 
@@ -24,6 +26,8 @@ Commands:
   show-skill NAME         Resolve the bindings declared by a skill.
   discover                List discovered skills from configured or conventional roots.
   check FILE              Check a TOML file and its schema version.
+  edit -- CMD ... {}      Edit a private copy, then validate and install it.
+  restore-prev            Restore the previous valid configuration.
   validate                Validate the configuration and discovered skills.
   validate-skill PATH     Validate one skill directory.
   explain KEY             Show one value and its known skill references.
@@ -114,6 +118,24 @@ Success prints 'ok'. Errors report the file and any available location without c
 Options:
   -h, --help              Show this help without loading configuration.
 "#;
+const EDIT_HELP: &str = r#"Usage: skillcfg [--config PATH] edit -- CMD [ARGS] {}
+
+Replace one literal {} argument with the path to a private candidate. Run CMD
+without a shell or inherited standard streams. If the editor succeeds and the
+candidate passes check, atomically install it and save the old bytes as .prev.
+Success is silent.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+"#;
+const RESTORE_HELP: &str = r#"Usage: skillcfg [--config PATH] restore-prev
+
+Install the previous version from the .prev file after checking it. Save the
+current version as .prev so the restore can be reversed. Success is silent.
+
+Options:
+  -h, --help              Show this help without loading configuration.
+"#;
 const VALIDATE_HELP: &str = r#"Usage: skillcfg [--config PATH] validate [--root PATH]... [--strict]
 
 Validate the selected configuration, discovered skills, manifests, and scripts.
@@ -157,6 +179,8 @@ fn command_help(command: &str) -> Option<&'static str> {
         "show-skill" => Some(SHOW_SKILL_HELP),
         "discover" => Some(DISCOVER_HELP),
         "check" => Some(CHECK_HELP),
+        "edit" => Some(EDIT_HELP),
+        "restore-prev" => Some(RESTORE_HELP),
         "validate" => Some(VALIDATE_HELP),
         "validate-skill" => Some(VALIDATE_SKILL_HELP),
         "explain" => Some(EXPLAIN_HELP),
@@ -233,6 +257,9 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                 let command_args = args.collect::<Vec<_>>();
                 let mut help_args = command_args.iter();
                 while let Some(arg) = help_args.next() {
+                    if command == "edit" && arg == "--" {
+                        break;
+                    }
                     if (arg == "--root"
                         && matches!(
                             command.as_str(),
@@ -246,7 +273,38 @@ fn execute(args: impl Iterator<Item = OsString>) -> Result<(), CliError> {
                         return Err(CliError::Help(help));
                     }
                 }
+                if command == "edit" {
+                    let [marker, program, editor_args @ ..] = command_args.as_slice() else {
+                        return Err(CliError::Usage("edit requires -- CMD [ARGS] {}".to_owned()));
+                    };
+                    if marker != "--"
+                        || program.is_empty()
+                        || editor_args.iter().filter(|arg| *arg == "{}").count() != 1
+                    {
+                        return Err(CliError::Usage(
+                            "edit requires -- CMD and exactly one {} argument".to_owned(),
+                        ));
+                    }
+                    return config_edit::run(
+                        &config_path(explicit_config)?,
+                        config_edit::Operation::Edit {
+                            program,
+                            editor_args,
+                        },
+                    );
+                }
                 let mut args = command_args.into_iter();
+                if command == "restore-prev" {
+                    if args.next().is_some() {
+                        return Err(CliError::Usage(
+                            "restore-prev accepts no arguments".to_owned(),
+                        ));
+                    }
+                    return config_edit::run(
+                        &config_path(explicit_config)?,
+                        config_edit::Operation::Restore,
+                    );
+                }
                 if command == "check" {
                     let file = args
                         .next()
