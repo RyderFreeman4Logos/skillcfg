@@ -90,6 +90,7 @@ fn get_prints_raw_value_and_missing_key_is_stderr_only() {
     assert_eq!(missing.status.code(), Some(1));
     assert!(missing.stdout.is_empty());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("demo.absent"));
+    assert!(!String::from_utf8_lossy(&missing.stderr).contains("hint:"));
 }
 
 #[test]
@@ -106,6 +107,13 @@ fn missing_and_malformed_configs_are_stderr_only() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(&missing.display().to_string()));
+    assert!(
+        stderr
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .starts_with("skillcfg: hint:")
+    );
 
     let invalid = temp.0.join("invalid.toml");
     fs::write(&invalid, "schema_version = [").unwrap();
@@ -120,6 +128,13 @@ fn missing_and_malformed_configs_are_stderr_only() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(&invalid.display().to_string()));
     assert!(stderr.contains("invalid TOML"));
+    assert!(
+        stderr
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .contains("skillcfg check")
+    );
 }
 
 fn assert_private_error(source: &str, category: &str) {
@@ -137,7 +152,49 @@ fn assert_private_error(source: &str, category: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(category));
     assert!(stderr.contains(path.to_str().unwrap()));
+    assert!(
+        stderr
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .starts_with("skillcfg: hint:")
+    );
     assert!(!stderr.contains("SYNTHETIC_PRIVATE_CANARY"), "{stderr}");
+}
+
+#[test]
+fn check_parses_only_the_requested_file() {
+    let temp = TempDir::new();
+    let config = temp.0.join("candidate.toml");
+    fs::write(
+        &config,
+        "schema_version = 1\n[discovery]\nroots = [\"absent\"]\n",
+    )
+    .unwrap();
+    let config_arg = config.to_str().unwrap();
+    assert_eq!(
+        message(run(&["check", config_arg], &temp.0, None, None)),
+        "ok\n"
+    );
+    assert_eq!(
+        run(&["--config", config_arg, "validate"], &temp.0, None, None)
+            .status
+            .code(),
+        Some(1),
+    );
+    for content in [
+        b"schema_version = 1\nsecret = \"SYNTHETIC_PRIVATE_CANARY\" broken\n".as_slice(),
+        b"schema_version = \"SYNTHETIC_PRIVATE_CANARY\"\n",
+        b"schema_version = 1\n\xff",
+    ] {
+        fs::write(&config, content).unwrap();
+        let out = run(&["check", config_arg], &temp.0, None, None);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(out.stdout.is_empty());
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert!(error.contains(config_arg));
+        assert!(!error.contains("SYNTHETIC_PRIVATE_CANARY"));
+    }
 }
 
 #[test]
@@ -311,6 +368,11 @@ fn every_help_option_succeeds_without_loading_config_or_home() {
             "validate",
             "Usage: skillcfg [--config PATH] validate [--root PATH]... [--strict]",
             "Warnings are non-fatal unless --strict is set.",
+        ),
+        (
+            "check",
+            "Usage: skillcfg check FILE",
+            "without discovering skills",
         ),
         (
             "validate-skill",
